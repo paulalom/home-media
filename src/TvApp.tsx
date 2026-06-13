@@ -12,6 +12,8 @@ type RemoteAction =
   | 'down'
   | 'enter'
   | 'left'
+  | 'pause'
+  | 'play'
   | 'playPause'
   | 'right'
   | 'up'
@@ -81,15 +83,27 @@ type FocusPosition = {
   sectionIndex: number
 }
 
+type DetailState = {
+  itemIndex: number
+  title: TvTitle
+}
+
 type HomeMediaWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
+  }
+  tizen?: {
+    tvinputdevice?: {
+      registerKey?: (key: string) => void
+      registerKeyBatch?: (keys: string[]) => void
+    }
   }
 }
 
 const apiBaseStorageKey = 'home-media-api-base-v1'
 const playbackStorageKey = 'home-media-playback-v1'
 const maxRowItems = 28
+const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
 
 async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
   const response = await fetch(buildApiUrl('/api/library', apiBase), {
@@ -107,6 +121,7 @@ async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
 function TvApp() {
   const [apiBase] = useState(readInitialApiBase)
   const [canLoadArtwork, setCanLoadArtwork] = useState(false)
+  const [detailState, setDetailState] = useState<DetailState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [focus, setFocus] = useState<FocusPosition>({
     itemIndex: 0,
@@ -119,6 +134,8 @@ function TvApp() {
   )
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const playbackHistoryRef = useRef(playbackHistory)
+  const detailListRef = useRef<HTMLDivElement | null>(null)
+  const detailSelectedItemRef = useRef<HTMLButtonElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
   const playerRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
@@ -132,6 +149,10 @@ function TvApp() {
       JSON.stringify(playbackHistory),
     )
   }, [playbackHistory])
+
+  useEffect(() => {
+    registerSamsungRemoteKeys()
+  }, [])
 
   useEffect(() => {
     const idleWindow = window as Window & {
@@ -195,6 +216,17 @@ function TvApp() {
   const selectedPlayback = selectedItem
     ? playbackHistory[selectedItem.id] ?? null
     : null
+  const selectedTitleIsContinue = activeSection?.id === 'continue'
+  const detailTitle = detailState?.title ?? null
+  const detailItemIndex = detailTitle
+    ? clamp(
+        detailState?.itemIndex ?? 0,
+        0,
+        Math.max(detailTitle.items.length - 1, 0),
+      )
+    : 0
+  const detailItem = detailTitle?.items[detailItemIndex] ?? null
+  const detailPlayback = detailItem ? playbackHistory[detailItem.id] ?? null : null
 
   useEffect(() => {
     const selectedCard = selectedCardRef.current
@@ -233,6 +265,28 @@ function TvApp() {
   }, [safeFocus.sectionIndex])
 
   useEffect(() => {
+    const list = detailListRef.current
+    const selectedItemElement = detailSelectedItemRef.current
+
+    if (!list || !selectedItemElement) {
+      return
+    }
+
+    const itemBounds = selectedItemElement.getBoundingClientRect()
+    const listBounds = list.getBoundingClientRect()
+    const padding = 18
+
+    if (itemBounds.top < listBounds.top) {
+      list.scrollTop -= listBounds.top - itemBounds.top + padding
+      return
+    }
+
+    if (itemBounds.bottom > listBounds.bottom) {
+      list.scrollTop += itemBounds.bottom - listBounds.bottom + padding
+    }
+  }, [detailItemIndex, detailTitle?.id])
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const action = getRemoteAction(event)
 
@@ -247,6 +301,11 @@ function TvApp() {
         return
       }
 
+      if (detailTitle) {
+        handleDetailAction(action)
+        return
+      }
+
       handleBrowseAction(action)
     }
 
@@ -256,8 +315,8 @@ function TvApp() {
   })
 
   function handleBrowseAction(action: RemoteAction) {
-    if (action === 'enter' || action === 'playPause') {
-      startPlayback(selectedItem)
+    if (action === 'enter' || action === 'play' || action === 'playPause') {
+      activateTitle(activeSection, selectedTitle)
       return
     }
 
@@ -271,9 +330,40 @@ function TvApp() {
     }
   }
 
+  function handleDetailAction(action: RemoteAction) {
+    if (action === 'back') {
+      closeDetail()
+      return
+    }
+
+    if (action === 'enter' || action === 'play' || action === 'playPause') {
+      startPlayback(detailItem)
+      return
+    }
+
+    if (
+      action === 'down' ||
+      action === 'right' ||
+      action === 'up' ||
+      action === 'left'
+    ) {
+      moveDetailFocus(action === 'down' || action === 'right' ? 1 : -1)
+    }
+  }
+
   function handlePlayerAction(action: RemoteAction) {
     if (action === 'back') {
       closePlayer()
+      return
+    }
+
+    if (action === 'play') {
+      playPlayer()
+      return
+    }
+
+    if (action === 'pause') {
+      pausePlayer()
       return
     }
 
@@ -306,6 +396,47 @@ function TvApp() {
     })
   }
 
+  function activateTitle(section: TvSection | null, title: TvTitle | null) {
+    if (!title) {
+      return
+    }
+
+    if (section?.id === 'continue') {
+      startPlayback(title.resumeItem)
+      return
+    }
+
+    openDetail(title)
+  }
+
+  function openDetail(title: TvTitle) {
+    setDetailState({
+      itemIndex: getDefaultDetailItemIndex(title, playbackHistoryRef.current),
+      title,
+    })
+  }
+
+  function closeDetail() {
+    setDetailState(null)
+  }
+
+  function moveDetailFocus(delta: number) {
+    setDetailState((currentState) => {
+      if (!currentState) {
+        return currentState
+      }
+
+      return {
+        ...currentState,
+        itemIndex: clamp(
+          currentState.itemIndex + delta,
+          0,
+          Math.max(currentState.title.items.length - 1, 0),
+        ),
+      }
+    })
+  }
+
   function startPlayback(item: MediaItem | null) {
     if (!item?.browserPlayable) {
       return
@@ -321,6 +452,18 @@ function TvApp() {
     }
 
     setPlayerItem(null)
+  }
+
+  function playPlayer() {
+    const player = playerRef.current
+
+    if (player) {
+      void player.play()
+    }
+  }
+
+  function pausePlayer() {
+    playerRef.current?.pause()
   }
 
   function togglePlayer() {
@@ -426,6 +569,85 @@ function TvApp() {
     )
   }
 
+  if (detailTitle) {
+    return (
+      <main className="tv-detail-shell">
+        <section className="tv-detail-hero">
+          <div className="tv-detail-art">
+            {canLoadArtwork && detailTitle.artworkUrl ? (
+              <img
+                alt=""
+                decoding="async"
+                loading="lazy"
+                onError={hideFailedArtwork}
+                src={resolveMediaUrl(detailTitle.artworkUrl, apiBase)}
+              />
+            ) : null}
+            <span>{detailTitle.kind === 'show' ? 'TV' : 'MOVIE'}</span>
+          </div>
+          <div className="tv-detail-copy">
+            <p>{detailTitle.kind === 'show' ? detailTitle.subtitle : 'Movie'}</p>
+            <h1>{detailTitle.title}</h1>
+            <div className="tv-detail-meta">
+              <span>{detailTitle.source}</span>
+              {detailItem ? <span>{getDetailItemLabel(detailItem)}</span> : null}
+              {detailPlayback && !detailPlayback.completed ? (
+                <span>{formatDuration(detailPlayback.position)}</span>
+              ) : null}
+            </div>
+          </div>
+        </section>
+
+        <section className="tv-detail-body">
+          <div className="tv-detail-heading">
+            <h2>{detailTitle.kind === 'show' ? 'Episodes' : 'Title'}</h2>
+            <span>{detailTitle.items.length}</span>
+          </div>
+          <div className="tv-detail-list" ref={detailListRef}>
+            {detailTitle.items.map((item, itemIndex) => {
+              const isSelected = detailItemIndex === itemIndex
+              const playback = playbackHistory[item.id] ?? null
+
+              return (
+                <button
+                  className={
+                    isSelected ? 'tv-detail-item selected' : 'tv-detail-item'
+                  }
+                  key={item.id}
+                  onClick={() => {
+                    setDetailState({
+                      itemIndex,
+                      title: detailTitle,
+                    })
+                    startPlayback(item)
+                  }}
+                  ref={isSelected ? detailSelectedItemRef : null}
+                  type="button"
+                >
+                  <span>{getDetailItemLabel(item)}</span>
+                  <strong>{getDetailItemTitle(item)}</strong>
+                  <p>{getDetailPlaybackLabel(item, playback)}</p>
+                  {playback && playback.duration > 0 ? (
+                    <div className="tv-progress" aria-hidden="true">
+                      <i
+                        style={{
+                          width: `${Math.min(
+                            (playback.position / playback.duration) * 100,
+                            100,
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  ) : null}
+                </button>
+              )
+            })}
+          </div>
+        </section>
+      </main>
+    )
+  }
+
   return (
     <main className="tv-shell">
       <header className="tv-topbar">
@@ -465,10 +687,14 @@ function TvApp() {
           <button
             className="tv-primary-action"
             disabled={!selectedItem?.browserPlayable}
-            onClick={() => startPlayback(selectedItem)}
+            onClick={() => activateTitle(activeSection, selectedTitle)}
             type="button"
           >
-            {selectedPlayback && !selectedPlayback.completed ? 'Resume' : 'Play'}
+            {getPrimaryActionLabel(
+              selectedTitle,
+              selectedPlayback,
+              selectedTitleIsContinue,
+            )}
           </button>
         </div>
       </section>
@@ -513,7 +739,7 @@ function TvApp() {
                         key={title.id}
                         onClick={() => {
                           setFocus({ itemIndex, sectionIndex })
-                          startPlayback(title.resumeItem)
+                          activateTitle(section, title)
                         }}
                         ref={isSelected ? selectedCardRef : null}
                         type="button"
@@ -584,14 +810,14 @@ function buildTvSections(
       titles: continueTitles,
     },
     {
-      id: 'movies',
-      label: 'Movies',
-      titles: movies,
-    },
-    {
       id: 'shows',
       label: 'TV Shows',
       titles: shows,
+    },
+    {
+      id: 'movies',
+      label: 'Movies',
+      titles: movies,
     },
   ]
 
@@ -726,9 +952,23 @@ function getRemoteAction(event: KeyboardEvent): RemoteAction | null {
   }
 
   if (
+    event.key === 'MediaPlay' ||
+    event.key === 'Play' ||
+    event.keyCode === 415
+  ) {
+    return 'play'
+  }
+
+  if (
+    event.key === 'MediaPause' ||
+    event.key === 'Pause' ||
+    event.keyCode === 19
+  ) {
+    return 'pause'
+  }
+
+  if (
     event.key === 'MediaPlayPause' ||
-    event.keyCode === 415 ||
-    event.keyCode === 19 ||
     event.keyCode === 10252
   ) {
     return 'playPause'
@@ -744,6 +984,23 @@ function getRemoteAction(event: KeyboardEvent): RemoteAction | null {
   }
 
   return null
+}
+
+function registerSamsungRemoteKeys() {
+  const tvInputDevice = (window as HomeMediaWindow).tizen?.tvinputdevice
+
+  try {
+    if (tvInputDevice?.registerKeyBatch) {
+      tvInputDevice.registerKeyBatch(samsungMediaKeys)
+      return
+    }
+
+    for (const key of samsungMediaKeys) {
+      tvInputDevice?.registerKey?.(key)
+    }
+  } catch {
+    // Browsers and some TV runtimes can reject key registration; keydown still works there.
+  }
 }
 
 function readPlaybackHistory(): PlaybackHistory {
@@ -810,6 +1067,70 @@ function resolveMediaUrl(streamUrl: string, apiBase: string) {
   }
 
   return buildApiUrl(streamUrl, apiBase)
+}
+
+function getPrimaryActionLabel(
+  title: TvTitle | null,
+  playback: PlaybackRecord | null,
+  isContinue: boolean,
+) {
+  if (!title) {
+    return 'Play'
+  }
+
+  if (!isContinue) {
+    return title.kind === 'show' ? 'Episodes' : 'Details'
+  }
+
+  return playback && !playback.completed ? 'Resume' : 'Play'
+}
+
+function getDefaultDetailItemIndex(title: TvTitle, history: PlaybackHistory) {
+  const watchedItem = title.items
+    .map((item, itemIndex) => ({
+      itemIndex,
+      record: history[item.id] ?? null,
+    }))
+    .filter((item) => item.record)
+    .sort(
+      (first, second) =>
+        (second.record?.updatedAt ?? 0) - (first.record?.updatedAt ?? 0),
+    )[0]
+
+  if (watchedItem) {
+    return watchedItem.itemIndex
+  }
+
+  const firstPlayableIndex = title.items.findIndex(
+    (item) => item.browserPlayable,
+  )
+
+  return Math.max(firstPlayableIndex, 0)
+}
+
+function getDetailItemLabel(item: MediaItem) {
+  return item.category === 'show' ? formatEpisodeNumber(item) : item.container
+}
+
+function getDetailItemTitle(item: MediaItem) {
+  return item.episodeTitle ?? item.title
+}
+
+function getDetailPlaybackLabel(
+  item: MediaItem,
+  playback: PlaybackRecord | null,
+) {
+  if (!item.browserPlayable) {
+    return `${item.container} indexed`
+  }
+
+  if (!playback) {
+    return item.container
+  }
+
+  return playback.completed
+    ? 'Watched'
+    : `Resume ${formatDuration(playback.position)}`
 }
 
 function getResumePosition(record: PlaybackRecord | null, duration: number) {
