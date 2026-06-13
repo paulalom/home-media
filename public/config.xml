@@ -12,6 +12,7 @@
   <content src="tv.html" />
   <access origin="*" subdomains="true" />
   <tizen:privilege name="http://tizen.org/privilege/internet" />
+  <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice" />
   <tizen:setting
     background-support="disable"
     context-menu="disable"

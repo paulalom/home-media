@@ -1338,30 +1338,41 @@ function clampFocus(focus: FocusPosition, sections: TvSection[]) {
 }
 
 function getRemoteAction(event: KeyboardEvent): RemoteAction | null {
-  if (event.key === 'ArrowUp' || event.keyCode === 38) {
+  const keyCode = event.keyCode || event.which
+
+  if (event.key === 'ArrowUp' || keyCode === 38) {
     return 'up'
   }
 
-  if (event.key === 'ArrowDown' || event.keyCode === 40) {
+  if (event.key === 'ArrowDown' || keyCode === 40) {
     return 'down'
   }
 
-  if (event.key === 'ArrowLeft' || event.keyCode === 37) {
+  if (event.key === 'ArrowLeft' || keyCode === 37) {
     return 'left'
   }
 
-  if (event.key === 'ArrowRight' || event.keyCode === 39) {
+  if (event.key === 'ArrowRight' || keyCode === 39) {
     return 'right'
   }
 
-  if (event.key === 'Enter' || event.keyCode === 13) {
+  if (event.key === 'Enter' || keyCode === 13) {
     return 'enter'
+  }
+
+  if (
+    event.key === 'MediaPlayPause' ||
+    event.key === 'PlayPause' ||
+    keyCode === 10252 ||
+    keyCode === 179
+  ) {
+    return 'playPause'
   }
 
   if (
     event.key === 'MediaPlay' ||
     event.key === 'Play' ||
-    event.keyCode === 415
+    keyCode === 415
   ) {
     return 'play'
   }
@@ -1369,23 +1380,16 @@ function getRemoteAction(event: KeyboardEvent): RemoteAction | null {
   if (
     event.key === 'MediaPause' ||
     event.key === 'Pause' ||
-    event.keyCode === 19
+    keyCode === 19
   ) {
     return 'pause'
-  }
-
-  if (
-    event.key === 'MediaPlayPause' ||
-    event.keyCode === 10252
-  ) {
-    return 'playPause'
   }
 
   if (
     event.key === 'BrowserBack' ||
     event.key === 'Escape' ||
     event.key === 'XF86Back' ||
-    event.keyCode === 10009
+    keyCode === 10009
   ) {
     return 'back'
   }
