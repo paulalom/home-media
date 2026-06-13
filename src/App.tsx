@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type SyntheticEvent,
 } from 'react'
 import {
@@ -10,10 +11,9 @@ import {
   Clapperboard,
   Database,
   FileVideo,
-  FolderSearch,
-  HardDrive,
   LayoutGrid,
   LoaderCircle,
+  Maximize2,
   Play,
   Radio,
   RefreshCcw,
@@ -132,10 +132,12 @@ type StatItem = {
 }
 
 const playbackStorageKey = 'home-media-playback-v1'
+const apiBaseStorageKey = 'home-media-api-base-v1'
+const defaultApiBase = normalizeApiBase(import.meta.env.VITE_HOME_MEDIA_API_BASE)
 const viewModes: ViewMode[] = ['Home', 'Movies', 'TV Shows']
 
-async function fetchLibrary(signal?: AbortSignal) {
-  const response = await fetch('/api/library', {
+async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
+  const response = await fetch(buildApiUrl('/api/library', apiBase), {
     cache: 'no-store',
     signal,
   })
@@ -148,6 +150,8 @@ async function fetchLibrary(signal?: AbortSignal) {
 }
 
 function App() {
+  const [apiBase, setApiBase] = useState(readInitialApiBase)
+  const [apiBaseDraft, setApiBaseDraft] = useState(apiBase)
   const [activeView, setActiveView] = useState<ViewMode>('Home')
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
@@ -161,6 +165,7 @@ function App() {
     null,
   )
   const [selectedTitleId, setSelectedTitleId] = useState<string | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
   const playbackHistoryRef = useRef(playbackHistory)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
   const playerRef = useRef<HTMLVideoElement | null>(null)
@@ -174,9 +179,17 @@ function App() {
   }, [playbackHistory])
 
   useEffect(() => {
+    if (apiBase) {
+      window.localStorage.setItem(apiBaseStorageKey, apiBase)
+    } else {
+      window.localStorage.removeItem(apiBaseStorageKey)
+    }
+  }, [apiBase])
+
+  useEffect(() => {
     const controller = new AbortController()
 
-    fetchLibrary(controller.signal)
+    fetchLibrary(apiBase, controller.signal)
       .then((nextLibrary) => {
         const nextCollections = buildCollections(
           nextLibrary.items,
@@ -205,7 +218,33 @@ function App() {
       })
 
     return () => controller.abort()
-  }, [])
+  }, [apiBase])
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (handleMediaKey(event, playerRef.current)) {
+        return
+      }
+
+      if (handleBackKey(event, showSettings, setShowSettings)) {
+        return
+      }
+
+      handleDirectionalFocus(event)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [showSettings])
+
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      if (!document.activeElement || document.activeElement === document.body) {
+        getFocusableElements()[0]?.focus()
+      }
+    })
+  }, [isLoading])
 
   const collections = useMemo(
     () => buildCollections(library?.items ?? [], playbackHistory),
@@ -281,7 +320,7 @@ function App() {
     setError(null)
 
     try {
-      const nextLibrary = await fetchLibrary()
+      const nextLibrary = await fetchLibrary(apiBase)
       const nextCollections = buildCollections(
         nextLibrary.items,
         playbackHistoryRef.current,
@@ -326,6 +365,23 @@ function App() {
     setSelectedEpisodeId(episode.id)
   }
 
+  function playSelectedItem() {
+    void playerRef.current?.play()
+  }
+
+  function fullscreenSelectedItem() {
+    const player = playerRef.current
+
+    if (!player) {
+      return
+    }
+
+    void player
+      .requestFullscreen()
+      .then(() => player.play())
+      .catch(() => player.play())
+  }
+
   function handleLoadedMetadata(
     item: MediaItem,
     event: SyntheticEvent<HTMLVideoElement>,
@@ -351,7 +407,7 @@ function App() {
       return
     }
 
-    const now = Date.now()
+    const now = getCurrentTimestamp()
 
     if (!force && now - (lastPlaybackWriteRef.current[item.id] ?? 0) < 5000) {
       return
@@ -367,6 +423,16 @@ function App() {
         updatedAt: now,
       },
     }))
+  }
+
+  function saveApiSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+
+    const nextApiBase = normalizeApiBase(apiBaseDraft)
+
+    setIsLoading(true)
+    setApiBase(nextApiBase)
+    setShowSettings(false)
   }
 
   return (
@@ -431,7 +497,15 @@ function App() {
             <button className="icon-button" title="Filters" type="button">
               <SlidersHorizontal size={19} />
             </button>
-            <button className="icon-button" title="Settings" type="button">
+            <button
+              className="icon-button"
+              onClick={() => {
+                setApiBaseDraft(apiBase)
+                setShowSettings((isOpen) => !isOpen)
+              }}
+              title="Server settings"
+              type="button"
+            >
               <Settings size={19} />
             </button>
             <button
@@ -443,13 +517,38 @@ function App() {
               <RefreshCcw size={18} />
               {scanRunning ? 'Scanning' : 'Scan'}
             </button>
+            {showSettings ? (
+              <form className="server-settings" onSubmit={saveApiSettings}>
+                <label htmlFor="server-url">Server URL</label>
+                <input
+                  id="server-url"
+                  onChange={(event) => setApiBaseDraft(event.target.value)}
+                  placeholder="http://192.168.1.25:4173"
+                  value={apiBaseDraft}
+                />
+                <div>
+                  <button className="secondary-button" type="submit">
+                    Save
+                  </button>
+                  <button
+                    className="secondary-button subtle"
+                    onClick={() => setApiBaseDraft('')}
+                    type="button"
+                  >
+                    This host
+                  </button>
+                </div>
+              </form>
+            ) : null}
           </div>
         </header>
 
         {error ? (
           <section className="error-banner" role="alert">
             <AlertCircle size={18} />
-            <span>{error}</span>
+            <span>
+              {error}. Server: {apiBase || 'this host'}
+            </span>
           </section>
         ) : null}
 
@@ -492,6 +591,134 @@ function App() {
                 ))}
               </div>
             </div>
+
+            {selectedTitle && selectedItem ? (
+              <section className="main-player" aria-label="Selected title">
+                <div className="main-player-heading">
+                  <div>
+                    <p className="eyebrow">
+                      {getTitleKindLabel(selectedTitle)}
+                    </p>
+                    <h3>{selectedTitle.title}</h3>
+                    <span>{getPlaybackLabel(selectedTitle, selectedItem)}</span>
+                  </div>
+                  <div className="main-player-actions">
+                    <button
+                      className="secondary-button"
+                      disabled={!selectedItem.browserPlayable}
+                      onClick={playSelectedItem}
+                      type="button"
+                    >
+                      <Play fill="currentColor" size={17} />
+                      Play
+                    </button>
+                    <button
+                      className="icon-button"
+                      disabled={!selectedItem.browserPlayable}
+                      onClick={fullscreenSelectedItem}
+                      title="Fullscreen"
+                      type="button"
+                    >
+                      <Maximize2 size={18} />
+                    </button>
+                  </div>
+                </div>
+
+                {selectedItem.browserPlayable ? (
+                  <video
+                    className="main-media-player"
+                    controls
+                    key={selectedItem.id}
+                    onEnded={(event) =>
+                      recordPlayback(selectedItem, event.currentTarget, true)
+                    }
+                    onLoadedMetadata={(event) =>
+                      handleLoadedMetadata(selectedItem, event)
+                    }
+                    onPause={(event) =>
+                      recordPlayback(selectedItem, event.currentTarget, true)
+                    }
+                    onTimeUpdate={(event) =>
+                      recordPlayback(selectedItem, event.currentTarget)
+                    }
+                    preload="metadata"
+                    ref={playerRef}
+                    src={resolveMediaUrl(selectedItem.streamUrl, apiBase)}
+                  />
+                ) : (
+                  <div className="player-frame unavailable wide">
+                    <Clapperboard size={42} />
+                    <p>{selectedItem.container} indexed</p>
+                    <span>Firefox needs a playable container</span>
+                  </div>
+                )}
+
+                <div className="main-player-meta">
+                  <span>{selectedItem.relativePath}</span>
+                  {selectedPlayback ? (
+                    <strong>
+                      {selectedPlayback.completed
+                        ? 'Watched'
+                        : `Resume at ${formatDuration(
+                            selectedPlayback.position,
+                          )}`}
+                    </strong>
+                  ) : null}
+                </div>
+
+                {selectedTitle.kind === 'show' ? (
+                  <div className="main-episodes">
+                    <div className="section-heading">
+                      <h3>Episodes</h3>
+                      <span>{formatNumber(selectedTitle.episodeCount)}</span>
+                    </div>
+                    <div className="episode-list">
+                      {selectedTitle.seasons.map((season) => (
+                        <div
+                          className="season-group"
+                          key={season.seasonNumber}
+                        >
+                          <p className="eyebrow">
+                            Season {season.seasonNumber || 'Unknown'}
+                          </p>
+                          {season.episodes.map((episode) => {
+                            const episodeRecord = playbackHistory[episode.id]
+
+                            return (
+                              <button
+                                className={
+                                  selectedItem.id === episode.id
+                                    ? 'episode-row selected'
+                                    : 'episode-row'
+                                }
+                                key={episode.id}
+                                onClick={() => selectEpisode(episode)}
+                                type="button"
+                              >
+                                <span>
+                                  {formatEpisodeNumber(episode)}
+                                  {episode.browserPlayable ? '' : ' indexed'}
+                                </span>
+                                <strong>
+                                  {episode.episodeTitle ?? episode.title}
+                                </strong>
+                                <p>
+                                  {episodeRecord
+                                    ? episodeRecord.completed
+                                      ? 'Watched'
+                                      : formatDuration(episodeRecord.position)
+                                    : episode.container}
+                                </p>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </section>
+            ) : null}
 
             {isLoading ? (
               <div className="empty-state">
@@ -560,175 +787,6 @@ function App() {
               </div>
             )}
           </section>
-
-          <aside className="inspector" aria-label="Selected media">
-            <section className="now-playing">
-              <div className="panel-heading compact">
-                <div>
-                  <p className="eyebrow">
-                    {selectedTitle?.kind === 'show' ? 'Show' : 'Movie'}
-                  </p>
-                  <h2>{selectedTitle?.title ?? 'No title selected'}</h2>
-                </div>
-                <button
-                  className="round-button"
-                  disabled={!selectedItem?.browserPlayable}
-                  onClick={() => void playerRef.current?.play()}
-                  title="Play"
-                  type="button"
-                >
-                  <Play fill="currentColor" size={18} />
-                </button>
-              </div>
-
-              {selectedItem ? (
-                selectedItem.browserPlayable ? (
-                  <video
-                    className="media-player"
-                    controls
-                    key={selectedItem.id}
-                    onEnded={(event) =>
-                      recordPlayback(selectedItem, event.currentTarget, true)
-                    }
-                    onLoadedMetadata={(event) =>
-                      handleLoadedMetadata(selectedItem, event)
-                    }
-                    onPause={(event) =>
-                      recordPlayback(selectedItem, event.currentTarget, true)
-                    }
-                    onTimeUpdate={(event) =>
-                      recordPlayback(selectedItem, event.currentTarget)
-                    }
-                    preload="metadata"
-                    ref={playerRef}
-                    src={selectedItem.streamUrl}
-                  />
-                ) : (
-                  <div className="player-frame unavailable">
-                    <Clapperboard size={42} />
-                    <p>{selectedItem.container} indexed</p>
-                    <span>Firefox needs a playable container</span>
-                  </div>
-                )
-              ) : (
-                <div className="player-frame unavailable">
-                  <Clapperboard size={42} />
-                  <p>No video selected</p>
-                </div>
-              )}
-
-              {selectedTitle ? (
-                <div className="metadata-row">
-                  <span>{getTitleKindLabel(selectedTitle)}</span>
-                  <strong>{getPlaybackLabel(selectedTitle, selectedItem)}</strong>
-                </div>
-              ) : null}
-
-              {selectedPlayback ? (
-                <div className="resume-note">
-                  {selectedPlayback.completed
-                    ? 'Watched'
-                    : `Resume at ${formatDuration(selectedPlayback.position)}`}
-                </div>
-              ) : null}
-            </section>
-
-            {selectedTitle?.kind === 'show' ? (
-              <section>
-                <div className="panel-heading compact">
-                  <h2>Episodes</h2>
-                  <Tv size={19} />
-                </div>
-                <div className="episode-list">
-                  {selectedTitle.seasons.map((season) => (
-                    <div className="season-group" key={season.seasonNumber}>
-                      <p className="eyebrow">
-                        Season {season.seasonNumber || 'Unknown'}
-                      </p>
-                      {season.episodes.map((episode) => {
-                        const episodeRecord = playbackHistory[episode.id]
-
-                        return (
-                          <button
-                            className={
-                              selectedItem?.id === episode.id
-                                ? 'episode-row selected'
-                                : 'episode-row'
-                            }
-                            key={episode.id}
-                            onClick={() => selectEpisode(episode)}
-                            type="button"
-                          >
-                            <span>
-                              {formatEpisodeNumber(episode)}
-                              {episode.browserPlayable ? '' : ' indexed'}
-                            </span>
-                            <strong>{episode.episodeTitle ?? episode.title}</strong>
-                            <p>
-                              {episodeRecord
-                                ? episodeRecord.completed
-                                  ? 'Watched'
-                                  : formatDuration(episodeRecord.position)
-                                : episode.container}
-                            </p>
-                          </button>
-                        )
-                      })}
-                    </div>
-                  ))}
-                </div>
-              </section>
-            ) : null}
-
-            <section>
-              <div className="panel-heading compact">
-                <h2>Sources</h2>
-                <FolderSearch size={19} />
-              </div>
-              <div className="source-list">
-                {(library?.sources ?? []).map((source) => (
-                  <article className="source-row" key={source.path}>
-                    <div>
-                      <strong>{source.name}</strong>
-                      <span>{source.path}</span>
-                    </div>
-                    <p>
-                      {formatNumber(source.videoCount)} videos -{' '}
-                      {formatNumber(source.playableCount)} ready -{' '}
-                      {source.sizeLabel}
-                    </p>
-                  </article>
-                ))}
-              </div>
-            </section>
-
-            <section>
-              <div className="panel-heading compact">
-                <h2>File</h2>
-                <HardDrive size={19} />
-              </div>
-              {selectedItem ? (
-                <dl className="detail-list">
-                  <div>
-                    <dt>Folder</dt>
-                    <dd>{selectedItem.folder || selectedItem.source}</dd>
-                  </div>
-                  <div>
-                    <dt>Path</dt>
-                    <dd>{selectedItem.relativePath}</dd>
-                  </div>
-                  <div>
-                    <dt>Updated</dt>
-                    <dd>{formatDate(selectedItem.modifiedAt)}</dd>
-                  </div>
-                </dl>
-              ) : (
-                <div className="empty-state compact">
-                  <p>No file selected</p>
-                </div>
-              )}
-            </section>
-          </aside>
         </section>
       </section>
     </main>
@@ -1063,6 +1121,133 @@ function readPlaybackHistory(): PlaybackHistory {
   }
 }
 
+function readInitialApiBase() {
+  try {
+    const params = new URLSearchParams(window.location.search)
+    const queryApiBase = params.get('api') ?? params.get('server')
+    const storedApiBase = window.localStorage.getItem(apiBaseStorageKey)
+
+    return normalizeApiBase(queryApiBase ?? storedApiBase ?? defaultApiBase)
+  } catch {
+    return defaultApiBase
+  }
+}
+
+function normalizeApiBase(value: string | null | undefined) {
+  const trimmedValue = value?.trim() ?? ''
+
+  if (!trimmedValue) {
+    return ''
+  }
+
+  const valueWithProtocol = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmedValue)
+    ? trimmedValue
+    : `http://${trimmedValue}`
+
+  try {
+    const url = new URL(valueWithProtocol)
+
+    return `${url.origin}${url.pathname}`.replace(/\/+$/, '')
+  } catch {
+    return valueWithProtocol.replace(/\/+$/, '')
+  }
+}
+
+function buildApiUrl(path: string, apiBase: string) {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+
+  return apiBase ? `${apiBase}${normalizedPath}` : normalizedPath
+}
+
+function resolveMediaUrl(streamUrl: string, apiBase: string) {
+  if (/^[a-z][a-z\d+.-]*:\/\//i.test(streamUrl)) {
+    return streamUrl
+  }
+
+  return buildApiUrl(streamUrl, apiBase)
+}
+
+function handleMediaKey(event: KeyboardEvent, player: HTMLVideoElement | null) {
+  if (event.key !== 'MediaPlayPause' || !player) {
+    return false
+  }
+
+  event.preventDefault()
+
+  if (player.paused) {
+    void player.play()
+  } else {
+    player.pause()
+  }
+
+  return true
+}
+
+function handleBackKey(
+  event: KeyboardEvent,
+  showSettings: boolean,
+  setShowSettings: (value: boolean) => void,
+) {
+  if (!['BrowserBack', 'Escape', 'XF86Back'].includes(event.key)) {
+    return false
+  }
+
+  if (showSettings) {
+    event.preventDefault()
+    setShowSettings(false)
+
+    return true
+  }
+
+  return false
+}
+
+function handleDirectionalFocus(event: KeyboardEvent) {
+  if (!['ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowUp'].includes(event.key)) {
+    return
+  }
+
+  if (isTextInput(document.activeElement)) {
+    return
+  }
+
+  const focusableElements = getFocusableElements()
+
+  if (!focusableElements.length) {
+    return
+  }
+
+  event.preventDefault()
+
+  const currentIndex = focusableElements.findIndex(
+    (element) => element === document.activeElement,
+  )
+  const offset =
+    event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1
+  const nextIndex =
+    currentIndex === -1
+      ? 0
+      : (currentIndex + offset + focusableElements.length) %
+        focusableElements.length
+
+  focusableElements[nextIndex]?.focus()
+}
+
+function getFocusableElements() {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(
+      'button:not(:disabled), input:not(:disabled), video[controls]',
+    ),
+  ).filter((element) => element.getClientRects().length > 0)
+}
+
+function isTextInput(element: Element | null) {
+  return (
+    element instanceof HTMLInputElement ||
+    element instanceof HTMLTextAreaElement
+  )
+}
+
 function getResumePosition(record: PlaybackRecord | null, duration: number) {
   if (!record || record.completed || !Number.isFinite(duration)) {
     return 0
@@ -1113,13 +1298,6 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value)
 }
 
-function formatDate(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(new Date(value))
-}
-
 function formatScanTime(value: string) {
   return new Intl.DateTimeFormat(undefined, {
     hour: 'numeric',
@@ -1155,6 +1333,10 @@ function formatBytes(bytes: number) {
   return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${
     units[unitIndex]
   }`
+}
+
+function getCurrentTimestamp() {
+  return Date.now()
 }
 
 export default App
