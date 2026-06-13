@@ -94,6 +94,13 @@ const MIME_BY_EXTENSION = new Map([
   ['.webm', 'video/webm'],
   ['.wmv', 'video/x-ms-wmv'],
 ])
+const API_CORS_HEADERS = {
+  'Access-Control-Allow-Headers': 'Content-Type, Range',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Expose-Headers':
+    'Accept-Ranges, Content-Length, Content-Range, Content-Type',
+}
 
 export function getMediaRoot() {
   return process.env.HOME_MEDIA_ROOT ?? DEFAULT_MEDIA_ROOT
@@ -148,6 +155,15 @@ export async function handleMediaApi(
   res: ServerResponse,
 ): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'http://home-media.local')
+  const isApiPath =
+    url.pathname === '/api/library' || /^\/api\/media\/[^/]+\/stream$/.test(url.pathname)
+
+  if (isApiPath && req.method === 'OPTIONS') {
+    res.writeHead(204, API_CORS_HEADERS)
+    res.end()
+
+    return true
+  }
 
   if (url.pathname === '/api/library') {
     if (req.method !== 'GET') {
@@ -300,6 +316,7 @@ async function streamMedia(
 
   if (req.headers.range && !range) {
     res.writeHead(416, {
+      ...API_CORS_HEADERS,
       'Accept-Ranges': 'bytes',
       'Content-Range': `bytes */${stats.size}`,
     })
@@ -309,6 +326,7 @@ async function streamMedia(
 
   if (!range) {
     res.writeHead(200, {
+      ...API_CORS_HEADERS,
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-store',
       'Content-Length': stats.size,
@@ -327,6 +345,7 @@ async function streamMedia(
   const contentLength = range.end - range.start + 1
 
   res.writeHead(206, {
+    ...API_CORS_HEADERS,
     'Accept-Ranges': 'bytes',
     'Cache-Control': 'no-store',
     'Content-Length': contentLength,
@@ -591,6 +610,7 @@ function formatBytes(bytes: number) {
 
 function sendJson(res: ServerResponse, payload: unknown) {
   res.writeHead(200, {
+    ...API_CORS_HEADERS,
     'Cache-Control': 'no-store',
     'Content-Type': 'application/json; charset=utf-8',
   })
@@ -599,6 +619,7 @@ function sendJson(res: ServerResponse, payload: unknown) {
 
 function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]) {
   res.writeHead(405, {
+    ...API_CORS_HEADERS,
     Allow: allowedMethods.join(', '),
     'Content-Type': 'application/json; charset=utf-8',
   })
@@ -607,6 +628,7 @@ function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]) {
 
 function sendError(res: ServerResponse, statusCode: number, message: string) {
   res.writeHead(statusCode, {
+    ...API_CORS_HEADERS,
     'Content-Type': 'application/json; charset=utf-8',
   })
   res.end(JSON.stringify({ error: message }))

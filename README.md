@@ -15,9 +15,16 @@ Home Media is a new local-first media server project intended to replace a Plex-
 ```sh
 npm install
 npm run dev
+npm run dev:lan
 npm run lint
 npm run build
+npm run build:tv
+npm run preview:lan
 ```
+
+## Samsung TV Prototype
+
+This repo includes a Tizen Web app prototype path for Samsung TVs. See [docs/samsung-tv-prototype.md](docs/samsung-tv-prototype.md) for building a `.wgt`, running the media server on your LAN, and installing the app on a developer-mode TV.
 
 ## Next Milestones
 
