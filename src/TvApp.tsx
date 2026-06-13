@@ -5,6 +5,7 @@ import {
   useState,
   type SyntheticEvent,
 } from 'react'
+import { Settings } from 'lucide-react'
 
 type MediaCategory = 'movie' | 'show' | 'other'
 type RemoteAction =
@@ -84,6 +85,7 @@ type FocusPosition = {
 }
 
 type DetailState = {
+  focusArea: 'episode' | 'episodeMenu' | 'titleMenu'
   itemIndex: number
   title: TvTitle
 }
@@ -91,6 +93,29 @@ type DetailState = {
 type PlayerClock = {
   duration: number
   position: number
+}
+
+type ActionMenuState =
+  | {
+      kind: 'episode'
+      itemIndex: number
+      title: TvTitle
+    }
+  | {
+      kind: 'title'
+      title: TvTitle
+    }
+
+type ActionMenuEntry = {
+  disabled?: boolean
+  id:
+    | 'mark-all-unwatched'
+    | 'mark-all-watched'
+    | 'mark-previous-unwatched'
+    | 'mark-previous-watched'
+    | 'mark-unwatched'
+    | 'mark-watched'
+  label: string
 }
 
 type HomeMediaWindow = Window & {
@@ -125,6 +150,8 @@ async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
 }
 
 function TvApp() {
+  const [actionMenu, setActionMenu] = useState<ActionMenuState | null>(null)
+  const [actionMenuIndex, setActionMenuIndex] = useState(0)
   const [apiBase] = useState(readInitialApiBase)
   const [canLoadArtwork, setCanLoadArtwork] = useState(false)
   const [detailState, setDetailState] = useState<DetailState | null>(null)
@@ -146,7 +173,7 @@ function TvApp() {
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const playbackHistoryRef = useRef(playbackHistory)
   const detailListRef = useRef<HTMLDivElement | null>(null)
-  const detailSelectedItemRef = useRef<HTMLButtonElement | null>(null)
+  const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
   const playerHudTimeoutRef = useRef<number | null>(null)
   const playerRef = useRef<HTMLVideoElement | null>(null)
@@ -245,8 +272,17 @@ function TvApp() {
         Math.max(detailTitle.items.length - 1, 0),
       )
     : 0
+  const detailFocusArea = detailState?.focusArea ?? 'episode'
   const detailItem = detailTitle?.items[detailItemIndex] ?? null
   const detailPlayback = detailItem ? playbackHistory[detailItem.id] ?? null : null
+  const actionMenuEntries = actionMenu
+    ? getActionMenuEntries(actionMenu)
+    : []
+  const safeActionMenuIndex = clamp(
+    actionMenuIndex,
+    0,
+    Math.max(actionMenuEntries.length - 1, 0),
+  )
 
   useEffect(() => {
     const selectedCard = selectedCardRef.current
@@ -306,6 +342,32 @@ function TvApp() {
     }
   }, [detailItemIndex, detailTitle?.id])
 
+  function handleActionMenuAction(action: RemoteAction) {
+    if (action === 'back') {
+      closeActionMenu()
+      return
+    }
+
+    if (action === 'enter' || action === 'play' || action === 'playPause') {
+      const entry = actionMenuEntries[safeActionMenuIndex]
+
+      if (actionMenu && entry && !entry.disabled) {
+        applyActionMenuEntry(actionMenu, entry.id)
+      }
+
+      return
+    }
+
+    if (
+      action === 'down' ||
+      action === 'right' ||
+      action === 'up' ||
+      action === 'left'
+    ) {
+      moveActionMenuFocus(action === 'down' || action === 'right' ? 1 : -1)
+    }
+  }
+
   function handleBrowseAction(action: RemoteAction) {
     if (action === 'enter' || action === 'play' || action === 'playPause') {
       activateTitle(activeSection, selectedTitle)
@@ -329,17 +391,56 @@ function TvApp() {
     }
 
     if (action === 'enter' || action === 'play' || action === 'playPause') {
+      if (detailTitle && detailFocusArea === 'titleMenu') {
+        openTitleActionMenu(detailTitle)
+        return
+      }
+
+      if (detailTitle && detailFocusArea === 'episodeMenu') {
+        openEpisodeActionMenu(detailTitle, detailItemIndex)
+        return
+      }
+
       startPlayback(detailItem)
       return
     }
 
-    if (
-      action === 'down' ||
-      action === 'right' ||
-      action === 'up' ||
-      action === 'left'
-    ) {
-      moveDetailFocus(action === 'down' || action === 'right' ? 1 : -1)
+    if (action === 'left') {
+      if (detailFocusArea === 'episode') {
+        setDetailFocusArea('episodeMenu')
+      }
+
+      return
+    }
+
+    if (action === 'right') {
+      if (
+        detailFocusArea === 'episodeMenu' ||
+        detailFocusArea === 'titleMenu'
+      ) {
+        setDetailFocusArea('episode')
+      }
+
+      return
+    }
+
+    if (action === 'up') {
+      if (detailItemIndex === 0) {
+        setDetailFocusArea('titleMenu')
+        return
+      }
+
+      moveDetailFocus(-1)
+      return
+    }
+
+    if (action === 'down') {
+      if (detailFocusArea === 'titleMenu') {
+        setDetailFocusArea('episode')
+        return
+      }
+
+      moveDetailFocus(1)
     }
   }
 
@@ -364,7 +465,10 @@ function TvApp() {
       return
     }
 
-    if (action === 'left' || action === 'right') {
+    if (
+      action === 'right' ||
+      action === 'left'
+    ) {
       skipPlayer(action === 'right' ? 30 : -10)
     }
   }
@@ -403,13 +507,26 @@ function TvApp() {
 
   function openDetail(title: TvTitle) {
     setDetailState({
+      focusArea: 'episode',
       itemIndex: getDefaultDetailItemIndex(title, playbackHistoryRef.current),
       title,
     })
   }
 
   function closeDetail() {
+    closeActionMenu()
     setDetailState(null)
+  }
+
+  function setDetailFocusArea(focusArea: DetailState['focusArea']) {
+    setDetailState((currentState) =>
+      currentState
+        ? {
+            ...currentState,
+            focusArea,
+          }
+        : currentState,
+    )
   }
 
   function moveDetailFocus(delta: number) {
@@ -420,12 +537,126 @@ function TvApp() {
 
       return {
         ...currentState,
+        focusArea:
+          currentState.focusArea === 'titleMenu'
+            ? 'episode'
+            : currentState.focusArea,
         itemIndex: clamp(
           currentState.itemIndex + delta,
           0,
           Math.max(currentState.title.items.length - 1, 0),
         ),
       }
+    })
+  }
+
+  function openTitleActionMenu(title: TvTitle) {
+    setActionMenu({
+      kind: 'title',
+      title,
+    })
+    setActionMenuIndex(0)
+  }
+
+  function openEpisodeActionMenu(title: TvTitle, itemIndex: number) {
+    setActionMenu({
+      itemIndex,
+      kind: 'episode',
+      title,
+    })
+    setActionMenuIndex(0)
+  }
+
+  function closeActionMenu() {
+    setActionMenu(null)
+    setActionMenuIndex(0)
+  }
+
+  function moveActionMenuFocus(delta: number) {
+    setActionMenuIndex((currentIndex) =>
+      clamp(currentIndex + delta, 0, Math.max(actionMenuEntries.length - 1, 0)),
+    )
+  }
+
+  function applyActionMenuEntry(
+    menu: ActionMenuState,
+    entryId: ActionMenuEntry['id'],
+  ) {
+    if (entryId === 'mark-all-watched') {
+      markItemsWatched(menu.title.items)
+      closeActionMenu()
+      return
+    }
+
+    if (entryId === 'mark-all-unwatched') {
+      markItemsUnwatched(menu.title.items)
+      closeActionMenu()
+      return
+    }
+
+    const itemIndex = menu.kind === 'episode' ? menu.itemIndex : 0
+    const selectedItem = menu.title.items[itemIndex]
+
+    if (!selectedItem) {
+      closeActionMenu()
+      return
+    }
+
+    if (entryId === 'mark-watched') {
+      markItemsWatched([selectedItem])
+    } else if (entryId === 'mark-unwatched') {
+      markItemsUnwatched([selectedItem])
+    } else if (entryId === 'mark-previous-watched') {
+      markItemsWatched(menu.title.items.slice(0, itemIndex))
+    } else if (entryId === 'mark-previous-unwatched') {
+      markItemsUnwatched(menu.title.items.slice(0, itemIndex))
+    }
+
+    closeActionMenu()
+  }
+
+  function markItemsWatched(items: MediaItem[]) {
+    if (!items.length) {
+      return
+    }
+
+    const now = getCurrentTimestamp()
+
+    setPlaybackHistory((currentHistory) => {
+      const nextHistory = { ...currentHistory }
+
+      for (const [itemIndex, item] of items.entries()) {
+        const existingRecord = currentHistory[item.id]
+        const duration =
+          existingRecord?.duration && existingRecord.duration > 0
+            ? existingRecord.duration
+            : 1
+
+        nextHistory[item.id] = {
+          completed: true,
+          duration,
+          position: duration,
+          updatedAt: now + itemIndex,
+        }
+      }
+
+      return nextHistory
+    })
+  }
+
+  function markItemsUnwatched(items: MediaItem[]) {
+    if (!items.length) {
+      return
+    }
+
+    setPlaybackHistory((currentHistory) => {
+      const nextHistory = { ...currentHistory }
+
+      for (const item of items) {
+        delete nextHistory[item.id]
+      }
+
+      return nextHistory
     })
   }
 
@@ -588,6 +819,11 @@ function TvApp() {
 
       event.preventDefault()
 
+      if (actionMenu) {
+        handleActionMenuAction(action)
+        return
+      }
+
       if (playerItem) {
         handlePlayerAction(action)
         return
@@ -686,7 +922,25 @@ function TvApp() {
           </div>
           <div className="tv-detail-copy">
             <p>{detailTitle.kind === 'show' ? detailTitle.subtitle : 'Movie'}</p>
-            <h1>{detailTitle.title}</h1>
+            <div className="tv-detail-title-row">
+              <h1>{detailTitle.title}</h1>
+              <button
+                aria-label={`${detailTitle.title} actions`}
+                className={
+                  detailFocusArea === 'titleMenu'
+                    ? 'tv-icon-button selected'
+                    : 'tv-icon-button'
+                }
+                onClick={() => {
+                  setDetailFocusArea('titleMenu')
+                  openTitleActionMenu(detailTitle)
+                }}
+                title={`${detailTitle.title} actions`}
+                type="button"
+              >
+                <Settings size={22} />
+              </button>
+            </div>
             <div className="tv-detail-meta">
               <span>{detailTitle.source}</span>
               {detailItem ? <span>{getDetailItemLabel(detailItem)}</span> : null}
@@ -705,44 +959,98 @@ function TvApp() {
           <div className="tv-detail-list" ref={detailListRef}>
             {detailTitle.items.map((item, itemIndex) => {
               const isSelected = detailItemIndex === itemIndex
+              const isEpisodeMenuSelected =
+                isSelected && detailFocusArea === 'episodeMenu'
               const playback = playbackHistory[item.id] ?? null
 
               return (
-                <button
-                  className={
-                    isSelected ? 'tv-detail-item selected' : 'tv-detail-item'
-                  }
+                <div
+                  className={getDetailItemClassName(
+                    isSelected,
+                    isEpisodeMenuSelected,
+                  )}
                   key={item.id}
-                  onClick={() => {
-                    setDetailState({
-                      itemIndex,
-                      title: detailTitle,
-                    })
-                    startPlayback(item)
-                  }}
                   ref={isSelected ? detailSelectedItemRef : null}
-                  type="button"
                 >
-                  <span>{getDetailItemLabel(item)}</span>
-                  <strong>{getDetailItemTitle(item)}</strong>
-                  <p>{getDetailPlaybackLabel(item, playback)}</p>
-                  {playback && playback.duration > 0 ? (
-                    <div className="tv-progress" aria-hidden="true">
-                      <i
-                        style={{
-                          width: `${Math.min(
-                            (playback.position / playback.duration) * 100,
-                            100,
-                          )}%`,
-                        }}
-                      />
-                    </div>
-                  ) : null}
-                </button>
+                  <button
+                    aria-label={`${getDetailItemTitle(item)} actions`}
+                    className={
+                      isEpisodeMenuSelected
+                        ? 'tv-icon-button selected'
+                        : 'tv-icon-button'
+                    }
+                    onClick={() => {
+                      setDetailState({
+                        focusArea: 'episodeMenu',
+                        itemIndex,
+                        title: detailTitle,
+                      })
+                      openEpisodeActionMenu(detailTitle, itemIndex)
+                    }}
+                    title={`${getDetailItemTitle(item)} actions`}
+                    type="button"
+                  >
+                    <Settings size={20} />
+                  </button>
+                  <button
+                    className="tv-detail-play"
+                    onClick={() => {
+                      setDetailState({
+                        focusArea: 'episode',
+                        itemIndex,
+                        title: detailTitle,
+                      })
+                      startPlayback(item)
+                    }}
+                    type="button"
+                  >
+                    <span>{getDetailItemLabel(item)}</span>
+                    <strong>{getDetailItemTitle(item)}</strong>
+                    <p>{getDetailPlaybackLabel(item, playback)}</p>
+                    {playback && playback.duration > 0 ? (
+                      <div className="tv-progress" aria-hidden="true">
+                        <i
+                          style={{
+                            width: `${Math.min(
+                              (playback.position / playback.duration) * 100,
+                              100,
+                            )}%`,
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                  </button>
+                </div>
               )
             })}
           </div>
         </section>
+
+        {actionMenu ? (
+          <section className="tv-action-menu" aria-modal="true" role="dialog">
+            <div className="tv-action-menu-panel">
+              <p>{getActionMenuEyebrow(actionMenu)}</p>
+              <h2>{getActionMenuTitle(actionMenu)}</h2>
+              <div className="tv-action-menu-list">
+                {actionMenuEntries.map((entry, entryIndex) => (
+                  <button
+                    className={
+                      safeActionMenuIndex === entryIndex
+                        ? 'tv-action-menu-item selected'
+                        : 'tv-action-menu-item'
+                    }
+                    disabled={entry.disabled}
+                    key={entry.id}
+                    onClick={() => applyActionMenuEntry(actionMenu, entry.id)}
+                    type="button"
+                  >
+                    {entry.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+        ) : null}
       </main>
     )
   }
@@ -1230,6 +1538,85 @@ function getDetailPlaybackLabel(
   return playback.completed
     ? 'Watched'
     : `Resume ${formatDuration(playback.position)}`
+}
+
+function getDetailItemClassName(isSelected: boolean, isMenuSelected: boolean) {
+  return [
+    'tv-detail-item',
+    isSelected ? 'selected' : '',
+    isMenuSelected ? 'menu-selected' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function getActionMenuEntries(menu: ActionMenuState): ActionMenuEntry[] {
+  if (menu.kind === 'title') {
+    return menu.title.kind === 'show'
+      ? [
+          {
+            id: 'mark-all-watched',
+            label: 'Mark all as watched',
+          },
+          {
+            id: 'mark-all-unwatched',
+            label: 'Mark all as unwatched',
+          },
+        ]
+      : [
+          {
+            id: 'mark-watched',
+            label: 'Mark watched',
+          },
+          {
+            id: 'mark-unwatched',
+            label: 'Mark unwatched',
+          },
+        ]
+  }
+
+  const hasPrevious = menu.itemIndex > 0
+
+  return [
+    {
+      id: 'mark-watched',
+      label: 'Mark watched',
+    },
+    {
+      id: 'mark-unwatched',
+      label: 'Mark unwatched',
+    },
+    {
+            disabled: !hasPrevious,
+            id: 'mark-previous-watched',
+            label: 'Mark previous as watched',
+          },
+          {
+            disabled: !hasPrevious,
+            id: 'mark-previous-unwatched',
+            label: 'Mark previous as unwatched',
+          },
+  ]
+}
+
+function getActionMenuEyebrow(menu: ActionMenuState) {
+  if (menu.kind === 'title') {
+    return menu.title.kind === 'show' ? 'Show actions' : 'Movie actions'
+  }
+
+  const item = menu.title.items[menu.itemIndex]
+
+  return item ? getDetailItemLabel(item) : 'Episode actions'
+}
+
+function getActionMenuTitle(menu: ActionMenuState) {
+  if (menu.kind === 'title') {
+    return menu.title.title
+  }
+
+  const item = menu.title.items[menu.itemIndex]
+
+  return item ? getDetailItemTitle(item) : menu.title.title
 }
 
 function getResumePosition(record: PlaybackRecord | null, duration: number) {
