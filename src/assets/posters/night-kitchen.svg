@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 560" role="img" aria-label="The Night Kitchen cover art">
+  <defs>
+    <linearGradient id="wall" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#251c34" />
+      <stop offset=".6" stop-color="#3f324d" />
+      <stop offset="1" stop-color="#e7a857" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="560" fill="url(#wall)" />
+  <rect x="46" y="156" width="308" height="262" rx="10" fill="#f3efe6" />
+  <rect x="74" y="190" width="96" height="88" fill="#c94c4c" />
+  <rect x="198" y="190" width="128" height="88" fill="#243b54" />
+  <rect x="74" y="306" width="252" height="76" fill="#2f6f6c" />
+  <circle cx="308" cy="118" r="34" fill="#f6d778" />
+  <path d="M87 436h226l22 70H65z" fill="#171316" />
+  <text x="42" y="68" fill="#fff7e7" font-family="Arial, sans-serif" font-size="24" font-weight="700">THE NIGHT</text>
+  <text x="42" y="102" fill="#fff7e7" font-family="Arial, sans-serif" font-size="34" font-weight="700">KITCHEN</text>
+</svg>

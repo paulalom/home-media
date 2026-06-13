@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 560" role="img" aria-label="Harbor Nine cover art">
+  <defs>
+    <linearGradient id="water" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#12355b" />
+      <stop offset=".55" stop-color="#1c7c8c" />
+      <stop offset="1" stop-color="#f1a66a" />
+    </linearGradient>
+  </defs>
+  <rect width="400" height="560" fill="url(#water)" />
+  <path d="M0 360c80-36 133-36 204 0s127 32 196-4v204H0z" fill="#092f45" opacity=".78" />
+  <path d="M76 246h248v102H76z" fill="#f6efe4" />
+  <path d="M102 216h196v30H102z" fill="#162736" />
+  <path d="M126 150h148l24 66H102z" fill="#df6f4f" />
+  <path d="M144 272h34v48h-34zm56 0h34v48h-34zm56 0h34v48h-34z" fill="#183b52" />
+  <path d="M28 392h344" stroke="#f7d98e" stroke-width="5" stroke-linecap="round" opacity=".65" />
+  <text x="42" y="82" fill="#f8fbff" font-family="Arial, sans-serif" font-size="30" font-weight="700">HARBOR</text>
+  <text x="42" y="122" fill="#f8fbff" font-family="Arial, sans-serif" font-size="48" font-weight="700">NINE</text>
+</svg>
