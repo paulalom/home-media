@@ -130,9 +130,14 @@ type StatItem = {
   icon: LucideIcon
 }
 
+type HomeMediaWindow = Window & {
+  HOME_MEDIA_CONFIG?: {
+    apiBase?: string
+  }
+}
+
 const playbackStorageKey = 'home-media-playback-v1'
 const apiBaseStorageKey = 'home-media-api-base-v1'
-const defaultApiBase = normalizeApiBase(import.meta.env.VITE_HOME_MEDIA_API_BASE)
 const viewModes: ViewMode[] = ['Home', 'Movies', 'TV Shows']
 
 async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
@@ -1031,10 +1036,21 @@ function readInitialApiBase() {
     const queryApiBase = params.get('api') ?? params.get('server')
     const storedApiBase = window.localStorage.getItem(apiBaseStorageKey)
 
-    return normalizeApiBase(queryApiBase ?? storedApiBase ?? defaultApiBase)
+    return normalizeApiBase(
+      queryApiBase ??
+        getRuntimeApiBase() ??
+        storedApiBase ??
+        import.meta.env.VITE_HOME_MEDIA_API_BASE,
+    )
   } catch {
-    return defaultApiBase
+    return normalizeApiBase(
+      getRuntimeApiBase() ?? import.meta.env.VITE_HOME_MEDIA_API_BASE,
+    )
   }
+}
+
+function getRuntimeApiBase() {
+  return (window as HomeMediaWindow).HOME_MEDIA_CONFIG?.apiBase
 }
 
 function normalizeApiBase(value: string | null | undefined) {

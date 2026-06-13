@@ -5,6 +5,7 @@ This repo can build a first-pass Samsung TV app as a packaged Tizen Web app. The
 ## What Was Added
 
 - `public/config.xml` is copied into `dist/` so Tizen tooling can package the Vite build as a `.wgt`.
+- `public/home-media-config.js` sets the desktop media server URL used by the packaged TV app.
 - `public/tizen-icon.png` provides a bitmap launcher icon for the Tizen package.
 - `npm run build:tv` builds with relative asset paths for the packaged TV runtime.
 - `npm run preview:lan` serves the built app and `/api/*` media endpoints on the local network.
@@ -32,11 +33,18 @@ ipconfig
 
 Use the address for your active Wi-Fi or Ethernet adapter. The examples below use `192.168.1.25`.
 
-Build the TV app with that server URL baked in:
+Make sure `public/home-media-config.js` points at the desktop server:
+
+```js
+window.HOME_MEDIA_CONFIG = {
+  apiBase: 'http://192.168.88.210:4173',
+}
+```
+
+Build the TV app:
 
 ```powershell
 cd F:\projects\home-media
-$env:VITE_HOME_MEDIA_API_BASE = 'http://192.168.1.25:4173'
 npm run build:tv
 ```
 
@@ -119,11 +127,12 @@ HMedia0001.HomeMedia
 
 ## 5. Configure The Server URL On TV
 
-The preferred path is to bake the URL in before `npm run build:tv`:
+The preferred path is to set the URL in `public/home-media-config.js` before `npm run build:tv`:
 
-```powershell
-$env:VITE_HOME_MEDIA_API_BASE = 'http://192.168.1.25:4173'
-npm run build:tv
+```js
+window.HOME_MEDIA_CONFIG = {
+  apiBase: 'http://192.168.88.210:4173',
+}
 ```
 
 If the TV app opens but points at the wrong server, select the settings icon in the app, enter the server URL, and save:
