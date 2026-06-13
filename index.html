@@ -7,7 +7,52 @@
     <title>Home Media</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div
+        style="
+          align-items: center;
+          background: #f3f6f7;
+          color: #17181b;
+          display: flex;
+          font: 20px/1.4 system-ui, sans-serif;
+          inset: 0;
+          justify-content: center;
+          padding: 32px;
+          position: fixed;
+          text-align: center;
+        "
+      >
+        Starting Home Media...
+      </div>
+    </div>
+    <script>
+      function showHomeMediaBootProblem(label, message) {
+        window.setTimeout(function () {
+          var root = document.getElementById('root')
+
+          if (root && root.textContent.indexOf('Starting Home Media') !== -1) {
+            root.innerHTML =
+              '<div style="padding:32px;font:20px/1.4 system-ui,sans-serif;color:#9a3429;background:#fff5f3;">Home Media ' +
+              label +
+              ': ' +
+              String(message || 'Unknown error') +
+              '</div>'
+          }
+        }, 1800)
+      }
+
+      window.addEventListener('error', function (event) {
+        showHomeMediaBootProblem(
+          'boot error',
+          event.message || event.error,
+        )
+      })
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event.reason && (event.reason.message || event.reason)
+
+        showHomeMediaBootProblem('async error', reason)
+      })
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

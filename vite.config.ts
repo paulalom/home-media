@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import legacy from '@vitejs/plugin-legacy'
 import { handleMediaApi } from './server/media-library'
 
 function mediaApiPlugin(): Plugin {
@@ -34,5 +35,12 @@ function mediaApiPlugin(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   base: './',
-  plugins: [react(), mediaApiPlugin()],
+  plugins: [
+    react(),
+    legacy({
+      modernPolyfills: true,
+      targets: ['Chrome >= 47'],
+    }),
+    mediaApiPlugin(),
+  ],
 })
