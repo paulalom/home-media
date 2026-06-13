@@ -88,6 +88,11 @@ type DetailState = {
   title: TvTitle
 }
 
+type PlayerClock = {
+  duration: number
+  position: number
+}
+
 type HomeMediaWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
@@ -103,6 +108,7 @@ type HomeMediaWindow = Window & {
 const apiBaseStorageKey = 'home-media-api-base-v1'
 const playbackStorageKey = 'home-media-playback-v1'
 const maxRowItems = 28
+const playerHudHideDelayMs = 1000
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
 
 async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
@@ -132,11 +138,17 @@ function TvApp() {
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
     readPlaybackHistory,
   )
+  const [playerClock, setPlayerClock] = useState<PlayerClock>({
+    duration: 0,
+    position: 0,
+  })
+  const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const playbackHistoryRef = useRef(playbackHistory)
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLButtonElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
+  const playerHudTimeoutRef = useRef<number | null>(null)
   const playerRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
   const selectedCardRef = useRef<HTMLButtonElement | null>(null)
@@ -149,6 +161,14 @@ function TvApp() {
       JSON.stringify(playbackHistory),
     )
   }, [playbackHistory])
+
+  useEffect(() => {
+    return () => {
+      if (playerHudTimeoutRef.current !== null) {
+        window.clearTimeout(playerHudTimeoutRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     registerSamsungRemoteKeys()
@@ -286,34 +306,6 @@ function TvApp() {
     }
   }, [detailItemIndex, detailTitle?.id])
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      const action = getRemoteAction(event)
-
-      if (!action) {
-        return
-      }
-
-      event.preventDefault()
-
-      if (playerItem) {
-        handlePlayerAction(action)
-        return
-      }
-
-      if (detailTitle) {
-        handleDetailAction(action)
-        return
-      }
-
-      handleBrowseAction(action)
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  })
-
   function handleBrowseAction(action: RemoteAction) {
     if (action === 'enter' || action === 'play' || action === 'playPause') {
       activateTitle(activeSection, selectedTitle)
@@ -442,6 +434,12 @@ function TvApp() {
       return
     }
 
+    clearPlayerHudTimeout()
+    setPlayerClock({
+      duration: 0,
+      position: 0,
+    })
+    setPlayerHudVisible(true)
     setPlayerItem(item)
   }
 
@@ -451,6 +449,7 @@ function TvApp() {
       playerRef.current.pause()
     }
 
+    clearPlayerHudTimeout()
     setPlayerItem(null)
   }
 
@@ -458,11 +457,13 @@ function TvApp() {
     const player = playerRef.current
 
     if (player) {
+      showPlayerHud()
       void player.play()
     }
   }
 
   function pausePlayer() {
+    showPlayerHud()
     playerRef.current?.pause()
   }
 
@@ -474,8 +475,10 @@ function TvApp() {
     }
 
     if (player.paused) {
+      showPlayerHud()
       void player.play()
     } else {
+      showPlayerHud()
       player.pause()
     }
   }
@@ -492,6 +495,8 @@ function TvApp() {
       0,
       Number.isFinite(player.duration) ? player.duration : player.currentTime,
     )
+    updatePlayerClock(player)
+    showPlayerHud(!player.paused && !player.ended)
   }
 
   function handleLoadedMetadata(
@@ -508,7 +513,39 @@ function TvApp() {
       video.currentTime = resumePosition
     }
 
+    updatePlayerClock(video)
+    showPlayerHud()
     void video.play()
+  }
+
+  function updatePlayerClock(video: HTMLVideoElement) {
+    setPlayerClock({
+      duration: Number.isFinite(video.duration) ? video.duration : 0,
+      position: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+    })
+  }
+
+  function clearPlayerHudTimeout() {
+    if (playerHudTimeoutRef.current === null) {
+      return
+    }
+
+    window.clearTimeout(playerHudTimeoutRef.current)
+    playerHudTimeoutRef.current = null
+  }
+
+  function showPlayerHud(autoHide = false) {
+    clearPlayerHudTimeout()
+    setPlayerHudVisible(true)
+
+    if (!autoHide) {
+      return
+    }
+
+    playerHudTimeoutRef.current = window.setTimeout(() => {
+      setPlayerHudVisible(false)
+      playerHudTimeoutRef.current = null
+    }, playerHudHideDelayMs)
   }
 
   function recordPlayback(
@@ -523,7 +560,7 @@ function TvApp() {
       return
     }
 
-    const now = Date.now()
+    const now = getCurrentTimestamp()
 
     if (!force && now - (lastPlaybackWriteRef.current[item.id] ?? 0) < 5000) {
       return
@@ -541,6 +578,34 @@ function TvApp() {
     }))
   }
 
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      const action = getRemoteAction(event)
+
+      if (!action) {
+        return
+      }
+
+      event.preventDefault()
+
+      if (playerItem) {
+        handlePlayerAction(action)
+        return
+      }
+
+      if (detailTitle) {
+        handleDetailAction(action)
+        return
+      }
+
+      handleBrowseAction(action)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  })
+
   if (playerItem) {
     return (
       <main className="tv-player-shell">
@@ -550,20 +615,54 @@ function TvApp() {
           controls
           key={playerItem.id}
           onEnded={(event) => {
+            clearPlayerHudTimeout()
+            updatePlayerClock(event.currentTarget)
             recordPlayback(playerItem, event.currentTarget, true)
             setPlayerItem(null)
           }}
           onLoadedMetadata={(event) => handleLoadedMetadata(playerItem, event)}
-          onPause={(event) =>
+          onPause={(event) => {
+            updatePlayerClock(event.currentTarget)
+            showPlayerHud()
             recordPlayback(playerItem, event.currentTarget, true)
-          }
-          onTimeUpdate={(event) => recordPlayback(playerItem, event.currentTarget)}
+          }}
+          onPlay={(event) => {
+            updatePlayerClock(event.currentTarget)
+            showPlayerHud(true)
+          }}
+          onPlaying={(event) => {
+            updatePlayerClock(event.currentTarget)
+            showPlayerHud(true)
+          }}
+          onSeeked={(event) => {
+            updatePlayerClock(event.currentTarget)
+            showPlayerHud(!event.currentTarget.paused)
+          }}
+          onSeeking={(event) => {
+            updatePlayerClock(event.currentTarget)
+            showPlayerHud()
+          }}
+          onTimeUpdate={(event) => {
+            updatePlayerClock(event.currentTarget)
+            recordPlayback(playerItem, event.currentTarget)
+          }}
+          onWaiting={(event) => {
+            updatePlayerClock(event.currentTarget)
+            showPlayerHud()
+          }}
           ref={playerRef}
           src={resolveMediaUrl(playerItem.streamUrl, apiBase)}
         />
-        <div className="tv-player-info">
-          <strong>{getItemDisplayTitle(playerItem)}</strong>
-          <span>{formatEpisodeNumber(playerItem)}</span>
+        <div
+          className={
+            playerHudVisible ? 'tv-player-info' : 'tv-player-info hidden'
+          }
+        >
+          <div className="tv-player-title">
+            <strong>{getItemDisplayTitle(playerItem)}</strong>
+            <span>{formatEpisodeNumber(playerItem)}</span>
+          </div>
+          <span>{formatPlayerClock(playerClock)}</span>
         </div>
       </main>
     )
@@ -1174,6 +1273,12 @@ function formatDuration(seconds: number) {
   return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
 }
 
+function formatPlayerClock(clock: PlayerClock) {
+  return `${formatDuration(clock.position)} / ${
+    clock.duration > 0 ? formatDuration(clock.duration) : '--:--'
+  }`
+}
+
 function sortByTitle(first: TvTitle, second: TvTitle) {
   return first.title.localeCompare(second.title, undefined, {
     numeric: true,
@@ -1202,6 +1307,10 @@ function clamp(value: number, min: number, max: number) {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Unexpected error'
+}
+
+function getCurrentTimestamp() {
+  return Date.now()
 }
 
 export default TvApp
