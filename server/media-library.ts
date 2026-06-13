@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto'
 import { createReadStream, promises as fs } from 'node:fs'
 import type { Stats } from 'node:fs'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { homedir } from 'node:os'
 import {
   basename,
   dirname,
@@ -17,6 +19,7 @@ export type MediaItem = {
   id: string
   title: string
   category: MediaCategory
+  artworkUrl?: string
   container: string
   browserPlayable: boolean
   relativePath: string
@@ -67,7 +70,62 @@ type LibraryCache = {
   root: string
 }
 
+type ArtworkCategory = Extract<MediaCategory, 'movie' | 'show'>
+
+type ArtworkTarget = {
+  cacheKey: string
+  category: ArtworkCategory
+  mediaPath: string
+  relativePath: string
+  searchTitle: string
+  source: string
+  title: string
+  year?: number
+}
+
+type ArtworkCacheEntry = {
+  cacheKey: string
+  category: ArtworkCategory
+  checkedAt: string
+  contentType?: string
+  fileName?: string
+  provider: 'tmdb'
+  sourceUrl?: string
+  status: 'missing' | 'ready'
+  title: string
+}
+
+type ResolvedArtwork = {
+  cacheControl: string
+  contentType: string
+  filePath: string
+}
+
+type TmdbCredentials =
+  | {
+      apiKey: string
+      bearerToken?: never
+    }
+  | {
+      apiKey?: never
+      bearerToken: string
+    }
+
+type TmdbSearchResult = {
+  first_air_date?: string
+  id?: number
+  name?: string
+  poster_path?: string | null
+  release_date?: string
+  title?: string
+}
+
+type TmdbSearchResponse = {
+  results?: TmdbSearchResult[]
+}
+
 const DEFAULT_MEDIA_ROOT = 'F:/media'
+const ARTWORK_CACHE_DIRECTORY_NAME = 'Home Media'
 const VIDEO_EXTENSIONS = new Set([
   '.avi',
   '.divx',
@@ -86,7 +144,14 @@ const BROWSER_PLAYABLE_EXTENSIONS = new Set([
   '.ogv',
   '.webm',
 ])
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp']
 const IGNORED_TOP_LEVEL_SOURCES = new Set(['mixes', 'music'])
+const ARTWORK_NAMES = ['poster', 'folder', 'cover', 'artwork']
+const TMDB_API_BASE_URL = 'https://api.themoviedb.org/3'
+const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500'
+const ARTWORK_FETCH_TIMEOUT_MS = 10_000
+const ARTWORK_MISSING_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
+const MAX_ARTWORK_BYTES = 8 * 1024 * 1024
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -99,6 +164,17 @@ const MIME_BY_EXTENSION = new Map([
   ['.webm', 'video/webm'],
   ['.wmv', 'video/x-ms-wmv'],
 ])
+const IMAGE_MIME_BY_EXTENSION = new Map([
+  ['.jpeg', 'image/jpeg'],
+  ['.jpg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.webp', 'image/webp'],
+])
+const IMAGE_EXTENSION_BY_MIME = new Map([
+  ['image/jpeg', '.jpg'],
+  ['image/png', '.png'],
+  ['image/webp', '.webp'],
+])
 const API_CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Range',
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
@@ -107,9 +183,24 @@ const API_CORS_HEADERS = {
     'Accept-Ranges, Content-Length, Content-Range, Content-Type',
 }
 let libraryCache: LibraryCache | null = null
+const artworkFetches = new Map<string, Promise<ResolvedArtwork | null>>()
 
 export function getMediaRoot() {
   return process.env.HOME_MEDIA_ROOT ?? DEFAULT_MEDIA_ROOT
+}
+
+export function getArtworkCacheRoot() {
+  const configuredRoot = process.env.HOME_MEDIA_ARTWORK_CACHE_ROOT?.trim()
+
+  if (configuredRoot) {
+    return resolve(configuredRoot)
+  }
+
+  const localAppData = process.env.LOCALAPPDATA?.trim()
+
+  return localAppData
+    ? resolve(localAppData, ARTWORK_CACHE_DIRECTORY_NAME, 'artwork')
+    : resolve(homedir(), '.home-media', 'artwork')
 }
 
 export async function scanMediaLibrary(
@@ -162,7 +253,8 @@ export async function handleMediaApi(
 ): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'http://home-media.local')
   const isApiPath =
-    url.pathname === '/api/library' || /^\/api\/media\/[^/]+\/stream$/.test(url.pathname)
+    url.pathname === '/api/library' ||
+    /^\/api\/media\/[^/]+\/(?:artwork|stream)$/.test(url.pathname)
 
   if (isApiPath && req.method === 'OPTIONS') {
     res.writeHead(204, API_CORS_HEADERS)
@@ -199,6 +291,28 @@ export async function handleMediaApi(
 
     try {
       await streamMedia(streamMatch[1], req, res)
+    } catch (error) {
+      sendError(res, 500, getErrorMessage(error))
+    }
+
+    return true
+  }
+
+  const artworkMatch = /^\/api\/media\/([^/]+)\/artwork$/.exec(url.pathname)
+
+  if (artworkMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      sendMethodNotAllowed(res, ['GET', 'HEAD'])
+      return true
+    }
+
+    try {
+      await streamArtwork(
+        artworkMatch[1],
+        req,
+        res,
+        url.searchParams.get('refresh') === '1',
+      )
     } catch (error) {
       sendError(res, 500, getErrorMessage(error))
     }
@@ -277,10 +391,12 @@ async function collectMediaFiles(
     const sourcePath = join(root, sourceName)
     const browserPlayable = BROWSER_PLAYABLE_EXTENSIONS.has(extension)
     const mediaMetadata = getMediaMetadata(relativePath, entry.name, extension)
+    const mediaId = encodeMediaId(relativePath)
     const item: MediaItem = {
-      id: encodeMediaId(relativePath),
+      id: mediaId,
       title: mediaMetadata.title,
       category: mediaMetadata.category,
+      artworkUrl: getArtworkUrl(mediaId, mediaMetadata.category),
       container: extension.replace('.', '').toUpperCase(),
       browserPlayable,
       relativePath,
@@ -289,9 +405,7 @@ async function collectMediaFiles(
       sizeBytes: stats.size,
       sizeLabel: formatBytes(stats.size),
       modifiedAt: stats.mtime.toISOString(),
-      streamUrl: `/api/media/${encodeURIComponent(
-        encodeMediaId(relativePath),
-      )}/stream`,
+      streamUrl: `/api/media/${encodeURIComponent(mediaId)}/stream`,
       showTitle: mediaMetadata.showTitle,
       seasonNumber: mediaMetadata.seasonNumber,
       episodeNumber: mediaMetadata.episodeNumber,
@@ -301,6 +415,512 @@ async function collectMediaFiles(
     items.push(item)
     upsertSource(sourceMap, sourceName, sourcePath, item)
   }
+}
+
+async function streamArtwork(
+  mediaId: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  refresh: boolean,
+) {
+  const target = await getArtworkTarget(mediaId)
+
+  if (!target) {
+    sendError(res, 404, 'Media not found')
+    return
+  }
+
+  const artwork = await resolveArtwork(target, refresh)
+
+  if (!artwork) {
+    sendError(res, 404, 'Artwork not found')
+    return
+  }
+
+  let stats: Stats
+
+  try {
+    stats = await fs.stat(artwork.filePath)
+  } catch {
+    sendError(res, 404, 'Artwork not found')
+    return
+  }
+
+  if (!stats.isFile()) {
+    sendError(res, 404, 'Artwork not found')
+    return
+  }
+
+  res.writeHead(200, {
+    ...API_CORS_HEADERS,
+    'Cache-Control': artwork.cacheControl,
+    'Content-Length': stats.size,
+    'Content-Type': artwork.contentType,
+    'Last-Modified': stats.mtime.toUTCString(),
+  })
+
+  if (req.method === 'HEAD') {
+    res.end()
+    return
+  }
+
+  createReadStream(artwork.filePath).pipe(res)
+}
+
+function getArtworkUrl(mediaId: string, category: MediaCategory) {
+  return isArtworkCategory(category)
+    ? `/api/media/${encodeURIComponent(mediaId)}/artwork`
+    : undefined
+}
+
+async function getArtworkTarget(
+  mediaId: string,
+): Promise<ArtworkTarget | null> {
+  const mediaPath = getMediaPath(mediaId)
+
+  if (!mediaPath) {
+    return null
+  }
+
+  const extension = extname(mediaPath).toLowerCase()
+
+  if (!VIDEO_EXTENSIONS.has(extension)) {
+    return null
+  }
+
+  try {
+    const stats = await fs.stat(mediaPath)
+
+    if (!stats.isFile()) {
+      return null
+    }
+  } catch {
+    return null
+  }
+
+  const root = resolve(getMediaRoot())
+  const relativePath = relative(root, mediaPath)
+  const metadata = getMediaMetadata(relativePath, basename(mediaPath), extension)
+
+  if (!isArtworkCategory(metadata.category)) {
+    return null
+  }
+
+  const title =
+    metadata.category === 'show'
+      ? metadata.showTitle ?? metadata.title
+      : metadata.title
+  const search = getArtworkSearchTitle(title)
+  const source = getSourceName(relativePath)
+
+  return {
+    cacheKey: createArtworkCacheKey(
+      metadata.category,
+      source,
+      search.title,
+      search.year,
+    ),
+    category: metadata.category,
+    mediaPath,
+    relativePath,
+    searchTitle: search.title,
+    source,
+    title,
+    year: search.year,
+  }
+}
+
+async function resolveArtwork(
+  target: ArtworkTarget,
+  refresh: boolean,
+): Promise<ResolvedArtwork | null> {
+  const localArtwork = await resolveLocalArtwork(target)
+
+  if (localArtwork) {
+    return localArtwork
+  }
+
+  if (!refresh) {
+    const cachedEntry = await readArtworkCacheEntry(target.cacheKey)
+
+    if (cachedEntry?.status === 'ready') {
+      const cachedArtwork = await resolveCachedArtwork(cachedEntry)
+
+      if (cachedArtwork) {
+        return cachedArtwork
+      }
+    }
+
+    if (cachedEntry?.status === 'missing' && isFreshMissingCache(cachedEntry)) {
+      return null
+    }
+  }
+
+  return fetchAndCacheArtwork(target)
+}
+
+async function resolveLocalArtwork(
+  target: ArtworkTarget,
+): Promise<ResolvedArtwork | null> {
+  const filePath = await findArtworkPath(target.mediaPath)
+
+  if (!filePath) {
+    return null
+  }
+
+  return {
+    cacheControl: 'public, max-age=3600',
+    contentType:
+      IMAGE_MIME_BY_EXTENSION.get(extname(filePath).toLowerCase()) ??
+      'application/octet-stream',
+    filePath,
+  }
+}
+
+async function resolveCachedArtwork(
+  entry: ArtworkCacheEntry,
+): Promise<ResolvedArtwork | null> {
+  if (!entry.fileName) {
+    return null
+  }
+
+  const cacheRoot = getArtworkCacheRoot()
+  const filePath = resolve(cacheRoot, entry.fileName)
+
+  if (!isPathInside(cacheRoot, filePath) || !(await isFile(filePath))) {
+    return null
+  }
+
+  return {
+    cacheControl: 'public, max-age=604800, immutable',
+    contentType:
+      entry.contentType ??
+      IMAGE_MIME_BY_EXTENSION.get(extname(filePath).toLowerCase()) ??
+      'application/octet-stream',
+    filePath,
+  }
+}
+
+async function fetchAndCacheArtwork(target: ArtworkTarget) {
+  const existingFetch = artworkFetches.get(target.cacheKey)
+
+  if (existingFetch) {
+    return existingFetch
+  }
+
+  const fetchPromise = fetchAndCacheRemoteArtwork(target)
+
+  artworkFetches.set(target.cacheKey, fetchPromise)
+
+  try {
+    return await fetchPromise
+  } finally {
+    if (artworkFetches.get(target.cacheKey) === fetchPromise) {
+      artworkFetches.delete(target.cacheKey)
+    }
+  }
+}
+
+async function fetchAndCacheRemoteArtwork(
+  target: ArtworkTarget,
+): Promise<ResolvedArtwork | null> {
+  const remoteArtwork = await findRemoteArtwork(target)
+
+  if (!remoteArtwork) {
+    if (getTmdbCredentials()) {
+      await writeMissingArtwork(target)
+    }
+
+    return null
+  }
+
+  const response = await fetchWithTimeout(remoteArtwork.imageUrl, {
+    headers: {
+      Accept: 'image/webp,image/png,image/jpeg,*/*',
+    },
+  })
+
+  if (!response.ok) {
+    throw new Error(`Artwork download failed (${response.status})`)
+  }
+
+  const contentLength = Number(response.headers.get('content-length') ?? 0)
+
+  if (contentLength > MAX_ARTWORK_BYTES) {
+    throw new Error('Artwork download is too large')
+  }
+
+  const imageBytes = Buffer.from(await response.arrayBuffer())
+
+  if (imageBytes.byteLength > MAX_ARTWORK_BYTES) {
+    throw new Error('Artwork download is too large')
+  }
+
+  const contentType =
+    normalizeImageContentType(response.headers.get('content-type')) ??
+    'image/jpeg'
+  const extension = IMAGE_EXTENSION_BY_MIME.get(contentType) ?? '.jpg'
+  const cacheRoot = getArtworkCacheRoot()
+  const fileName = `${target.cacheKey}${extension}`
+  const filePath = join(cacheRoot, fileName)
+  const tempPath = join(cacheRoot, `${fileName}.${Date.now()}.tmp`)
+
+  await fs.mkdir(cacheRoot, { recursive: true })
+  await fs.writeFile(tempPath, imageBytes)
+  await fs.rename(tempPath, filePath)
+  await writeArtworkCacheEntry({
+    cacheKey: target.cacheKey,
+    category: target.category,
+    checkedAt: new Date().toISOString(),
+    contentType,
+    fileName,
+    provider: 'tmdb',
+    sourceUrl: remoteArtwork.sourceUrl,
+    status: 'ready',
+    title: target.title,
+  })
+
+  return {
+    cacheControl: 'public, max-age=604800, immutable',
+    contentType,
+    filePath,
+  }
+}
+
+async function findRemoteArtwork(target: ArtworkTarget) {
+  const credentials = getTmdbCredentials()
+
+  if (!credentials) {
+    return null
+  }
+
+  const mediaType = target.category === 'movie' ? 'movie' : 'tv'
+  const searchUrl = new URL(`${TMDB_API_BASE_URL}/search/${mediaType}`)
+
+  searchUrl.searchParams.set('query', target.searchTitle)
+  searchUrl.searchParams.set('include_adult', 'false')
+
+  if (target.year) {
+    searchUrl.searchParams.set(
+      target.category === 'movie' ? 'year' : 'first_air_date_year',
+      String(target.year),
+    )
+  }
+
+  const headers: Record<string, string> = {
+    Accept: 'application/json',
+  }
+
+  if (credentials.bearerToken) {
+    headers.Authorization = credentials.bearerToken.startsWith('Bearer ')
+      ? credentials.bearerToken
+      : `Bearer ${credentials.bearerToken}`
+  } else if (credentials.apiKey) {
+    searchUrl.searchParams.set('api_key', credentials.apiKey)
+  } else {
+    return null
+  }
+
+  const response = await fetchWithTimeout(searchUrl, { headers })
+
+  if (!response.ok) {
+    throw new Error(`Artwork search failed (${response.status})`)
+  }
+
+  const payload = (await response.json()) as TmdbSearchResponse
+  const result = selectTmdbArtworkResult(payload.results ?? [], target)
+
+  if (!result?.poster_path) {
+    return null
+  }
+
+  return {
+    imageUrl: `${TMDB_IMAGE_BASE_URL}${result.poster_path}`,
+    sourceUrl: result.id
+      ? `https://www.themoviedb.org/${mediaType}/${result.id}`
+      : 'https://www.themoviedb.org/',
+  }
+}
+
+async function fetchWithTimeout(url: string | URL, init: RequestInit = {}) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ARTWORK_FETCH_TIMEOUT_MS)
+
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function readArtworkCacheEntry(cacheKey: string) {
+  try {
+    const payload = JSON.parse(
+      await fs.readFile(getArtworkCacheEntryPath(cacheKey), 'utf8'),
+    ) as unknown
+
+    return isArtworkCacheEntry(payload) ? payload : null
+  } catch {
+    return null
+  }
+}
+
+async function writeArtworkCacheEntry(entry: ArtworkCacheEntry) {
+  const cacheRoot = getArtworkCacheRoot()
+
+  await fs.mkdir(cacheRoot, { recursive: true })
+  await fs.writeFile(
+    getArtworkCacheEntryPath(entry.cacheKey),
+    JSON.stringify(entry, null, 2),
+    'utf8',
+  )
+}
+
+async function writeMissingArtwork(target: ArtworkTarget) {
+  await writeArtworkCacheEntry({
+    cacheKey: target.cacheKey,
+    category: target.category,
+    checkedAt: new Date().toISOString(),
+    provider: 'tmdb',
+    status: 'missing',
+    title: target.title,
+  })
+}
+
+function selectTmdbArtworkResult(
+  results: TmdbSearchResult[],
+  target: ArtworkTarget,
+) {
+  return results
+    .filter((result) => typeof result.poster_path === 'string')
+    .sort(
+      (first, second) =>
+        scoreTmdbResult(second, target) - scoreTmdbResult(first, target),
+    )[0]
+}
+
+function scoreTmdbResult(result: TmdbSearchResult, target: ArtworkTarget) {
+  const resultTitle = result.title ?? result.name ?? ''
+  const normalizedResultTitle = normalizeArtworkMatchTitle(resultTitle)
+  const normalizedTargetTitle = normalizeArtworkMatchTitle(target.searchTitle)
+  const resultYear = getYearFromDate(result.release_date ?? result.first_air_date)
+  let score = 1
+
+  if (normalizedResultTitle === normalizedTargetTitle) {
+    score += 8
+  } else if (
+    normalizedResultTitle.includes(normalizedTargetTitle) ||
+    normalizedTargetTitle.includes(normalizedResultTitle)
+  ) {
+    score += 3
+  }
+
+  if (target.year && resultYear === target.year) {
+    score += 4
+  }
+
+  return score
+}
+
+function getTmdbCredentials(): TmdbCredentials | null {
+  const bearerToken = process.env.HOME_MEDIA_TMDB_BEARER_TOKEN?.trim()
+
+  if (bearerToken) {
+    return { bearerToken }
+  }
+
+  const apiKey = process.env.HOME_MEDIA_TMDB_API_KEY?.trim()
+
+  return apiKey ? { apiKey } : null
+}
+
+function getArtworkCacheEntryPath(cacheKey: string) {
+  return join(getArtworkCacheRoot(), `${cacheKey}.json`)
+}
+
+function isFreshMissingCache(entry: ArtworkCacheEntry) {
+  return (
+    Date.now() - new Date(entry.checkedAt).getTime() <
+    ARTWORK_MISSING_CACHE_TTL_MS
+  )
+}
+
+function isArtworkCacheEntry(value: unknown): value is ArtworkCacheEntry {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  return (
+    typeof value.cacheKey === 'string' &&
+    (value.category === 'movie' || value.category === 'show') &&
+    typeof value.checkedAt === 'string' &&
+    value.provider === 'tmdb' &&
+    (value.status === 'missing' || value.status === 'ready') &&
+    typeof value.title === 'string' &&
+    (value.contentType === undefined || typeof value.contentType === 'string') &&
+    (value.fileName === undefined || typeof value.fileName === 'string') &&
+    (value.sourceUrl === undefined || typeof value.sourceUrl === 'string')
+  )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function getArtworkSearchTitle(title: string) {
+  const yearMatch = /\b(?:19|20)\d{2}\b/.exec(title)
+  const searchTitle = cleanTitle(
+    title
+      .replace(/\((?:19|20)\d{2}\)/g, '')
+      .replace(/\b(?:19|20)\d{2}\b/g, '')
+      .replace(/\b(?:2160p|1080p|720p|4K|BluRay|WEBRip|WEB-DL)\b.*$/i, ''),
+  )
+
+  return {
+    title: searchTitle || title,
+    year: yearMatch ? Number(yearMatch[0]) : undefined,
+  }
+}
+
+function createArtworkCacheKey(
+  category: ArtworkCategory,
+  source: string,
+  title: string,
+  year: number | undefined,
+) {
+  return createHash('sha256')
+    .update([category, source, title, year ?? ''].join('\n'))
+    .digest('hex')
+}
+
+function isArtworkCategory(category: MediaCategory): category is ArtworkCategory {
+  return category === 'movie' || category === 'show'
+}
+
+function normalizeImageContentType(value: string | null) {
+  const contentType = value?.split(';')[0]?.trim().toLowerCase()
+
+  return contentType && IMAGE_EXTENSION_BY_MIME.has(contentType)
+    ? contentType
+    : null
+}
+
+function normalizeArtworkMatchTitle(title: string) {
+  return title
+    .toLowerCase()
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function getYearFromDate(value: string | undefined) {
+  const year = value ? Number(value.slice(0, 4)) : Number.NaN
+
+  return Number.isInteger(year) ? year : null
 }
 
 async function streamMedia(
@@ -482,6 +1102,38 @@ function getMediaPath(mediaId: string) {
   }
 
   return filePath
+}
+
+async function findArtworkPath(mediaPath: string) {
+  const root = resolve(getMediaRoot())
+  const mediaDirectory = dirname(mediaPath)
+  const mediaBasename = basename(mediaPath, extname(mediaPath))
+  const directories = Array.from(
+    new Set([mediaDirectory, dirname(mediaDirectory)]),
+  ).filter((directory) => isPathInside(root, resolve(directory)))
+  const names = [mediaBasename, ...ARTWORK_NAMES]
+
+  for (const directory of directories) {
+    for (const name of names) {
+      for (const extension of IMAGE_EXTENSIONS) {
+        const candidate = join(directory, `${name}${extension}`)
+
+        if (await isFile(candidate)) {
+          return candidate
+        }
+      }
+    }
+  }
+
+  return null
+}
+
+async function isFile(path: string) {
+  try {
+    return (await fs.stat(path)).isFile()
+  } catch {
+    return false
+  }
 }
 
 function encodeMediaId(relativePath: string) {
