@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import legacy from '@vitejs/plugin-legacy'
+import { fileURLToPath } from 'node:url'
 import { handleMediaApi } from './server/media-library'
 
 function mediaApiPlugin(): Plugin {
@@ -35,6 +36,14 @@ function mediaApiPlugin(): Plugin {
 // https://vite.dev/config/
 export default defineConfig({
   base: './',
+  build: {
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        tv: fileURLToPath(new URL('./tv.html', import.meta.url)),
+      },
+    },
+  },
   plugins: [
     react(),
     legacy({

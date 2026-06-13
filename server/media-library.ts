@@ -62,6 +62,11 @@ type RangeRequest = {
   end: number
 }
 
+type LibraryCache = {
+  data: LibraryResponse
+  root: string
+}
+
 const DEFAULT_MEDIA_ROOT = 'F:/media'
 const VIDEO_EXTENSIONS = new Set([
   '.avi',
@@ -101,6 +106,7 @@ const API_CORS_HEADERS = {
   'Access-Control-Expose-Headers':
     'Accept-Ranges, Content-Length, Content-Range, Content-Type',
 }
+let libraryCache: LibraryCache | null = null
 
 export function getMediaRoot() {
   return process.env.HOME_MEDIA_ROOT ?? DEFAULT_MEDIA_ROOT
@@ -172,7 +178,10 @@ export async function handleMediaApi(
     }
 
     try {
-      sendJson(res, await scanMediaLibrary())
+      sendJson(
+        res,
+        await getCachedLibrary(url.searchParams.get('refresh') === '1'),
+      )
     } catch (error) {
       sendError(res, 500, getErrorMessage(error))
     }
@@ -198,6 +207,22 @@ export async function handleMediaApi(
   }
 
   return false
+}
+
+async function getCachedLibrary(refresh: boolean) {
+  const root = getMediaRoot()
+
+  if (!refresh && libraryCache?.root === root) {
+    return libraryCache.data
+  }
+
+  const data = await scanMediaLibrary(root)
+  libraryCache = {
+    data,
+    root,
+  }
+
+  return data
 }
 
 async function collectMediaFiles(

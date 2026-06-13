@@ -9,7 +9,7 @@
   <name>Home Media</name>
   <description>Local home media prototype for Samsung TV.</description>
   <icon src="tizen-icon.png" />
-  <content src="index.html" />
+  <content src="tv.html" />
   <access origin="*" subdomains="true" />
   <tizen:privilege name="http://tizen.org/privilege/internet" />
   <tizen:setting

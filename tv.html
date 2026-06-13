@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Home Media TV</title>
+  </head>
+  <body>
+    <div id="root">
+      <div
+        style="
+          align-items: center;
+          background: #101114;
+          color: #f7f4ed;
+          display: flex;
+          font: 22px/1.35 system-ui, sans-serif;
+          inset: 0;
+          justify-content: center;
+          padding: 40px;
+          position: fixed;
+          text-align: center;
+        "
+      >
+        Starting Home Media TV...
+      </div>
+    </div>
+    <script>
+      function showHomeMediaTvBootProblem(label, message) {
+        window.setTimeout(function () {
+          var root = document.getElementById('root')
+
+          if (root && root.textContent.indexOf('Starting Home Media TV') !== -1) {
+            root.innerHTML =
+              '<div style="padding:40px;font:22px/1.35 system-ui,sans-serif;color:#ffd9d4;background:#2a1210;">Home Media TV ' +
+              label +
+              ': ' +
+              String(message || 'Unknown error') +
+              '</div>'
+          }
+        }, 1800)
+      }
+
+      window.addEventListener('error', function (event) {
+        showHomeMediaTvBootProblem(
+          'boot error',
+          event.message || event.error,
+        )
+      })
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event.reason && (event.reason.message || event.reason)
+
+        showHomeMediaTvBootProblem('async error', reason)
+      })
+    </script>
+    <script src="./home-media-config.js"></script>
+    <script type="module" src="/src/tv-main.tsx"></script>
+  </body>
+</html>

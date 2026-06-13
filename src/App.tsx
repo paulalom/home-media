@@ -140,11 +140,18 @@ const playbackStorageKey = 'home-media-playback-v1'
 const apiBaseStorageKey = 'home-media-api-base-v1'
 const viewModes: ViewMode[] = ['Home', 'Movies', 'TV Shows']
 
-async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
-  const response = await fetch(buildApiUrl('/api/library', apiBase), {
-    cache: 'no-store',
-    signal,
-  })
+async function fetchLibrary(
+  apiBase: string,
+  signal?: AbortSignal,
+  refresh = false,
+) {
+  const response = await fetch(
+    buildApiUrl(`/api/library${refresh ? '?refresh=1' : ''}`, apiBase),
+    {
+      cache: 'no-store',
+      signal,
+    },
+  )
 
   if (!response.ok) {
     throw new Error(`Library scan failed (${response.status})`)
@@ -323,7 +330,7 @@ function App() {
     setError(null)
 
     try {
-      const nextLibrary = await fetchLibrary(apiBase)
+      const nextLibrary = await fetchLibrary(apiBase, undefined, true)
       const nextCollections = buildCollections(
         nextLibrary.items,
         playbackHistoryRef.current,

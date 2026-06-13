@@ -1,0 +1,347 @@
+:root {
+  --tv-bg: #101114;
+  --tv-border: #343a40;
+  --tv-coral: #e85d4f;
+  --tv-gold: #ffcf5a;
+  --tv-muted: #aeb5b0;
+  --tv-panel: #191c20;
+  --tv-panel-strong: #22272d;
+  --tv-teal: #37b6a6;
+  --tv-text: #f7f4ed;
+  --tv-text-soft: #dbe1dd;
+
+  background: var(--tv-bg);
+  color: var(--tv-text);
+  color-scheme: dark;
+  font: 18px/1.35 Inter, ui-sans-serif, system-ui, -apple-system,
+    BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-synthesis: none;
+  letter-spacing: 0;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--tv-bg);
+  margin: 0;
+  overflow: hidden;
+}
+
+button {
+  cursor: pointer;
+  font: inherit;
+}
+
+.tv-shell {
+  background:
+    linear-gradient(180deg, rgb(16 17 20 / 88%), var(--tv-bg) 58%),
+    linear-gradient(120deg, rgb(55 182 166 / 18%), transparent 42%),
+    var(--tv-bg);
+  display: grid;
+  gap: 22px;
+  height: 100vh;
+  overflow: hidden;
+  padding: 34px 42px 38px;
+}
+
+.tv-topbar,
+.tv-hero,
+.tv-row-heading,
+.tv-hero-meta,
+.tv-player-info {
+  align-items: center;
+  display: flex;
+}
+
+.tv-topbar {
+  justify-content: space-between;
+  min-height: 74px;
+}
+
+.tv-topbar p,
+.tv-hero-copy p,
+.tv-status span,
+.tv-row-heading span,
+.tv-card span,
+.tv-card p,
+.tv-player-info span {
+  color: var(--tv-muted);
+  font-size: 0.86rem;
+  font-weight: 800;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.tv-topbar h1 {
+  color: var(--tv-text);
+  font-size: 2rem;
+  line-height: 1.08;
+  margin: 4px 0 0;
+  max-width: 980px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tv-status {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+}
+
+.tv-status strong {
+  color: var(--tv-text-soft);
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.tv-hero {
+  background: var(--tv-panel);
+  border: 1px solid var(--tv-border);
+  border-radius: 8px;
+  display: grid;
+  gap: 28px;
+  grid-template-columns: 240px minmax(0, 1fr);
+  min-height: 260px;
+  overflow: hidden;
+  padding: 22px;
+}
+
+.tv-hero-art {
+  align-items: center;
+  align-self: stretch;
+  background:
+    linear-gradient(145deg, rgb(232 93 79 / 76%), rgb(55 182 166 / 72%)),
+    #22272d;
+  border-radius: 8px;
+  display: flex;
+  justify-content: center;
+  min-height: 214px;
+}
+
+.tv-hero-art span {
+  border: 2px solid rgb(247 244 237 / 54%);
+  border-radius: 8px;
+  color: #fffdf6;
+  font-size: 1rem;
+  font-weight: 900;
+  padding: 10px 14px;
+}
+
+.tv-hero-copy {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.tv-hero-copy h2 {
+  color: var(--tv-text);
+  font-size: 2.7rem;
+  line-height: 1.05;
+  margin: 0;
+  max-width: 1120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tv-hero-meta {
+  gap: 10px;
+}
+
+.tv-hero-meta span {
+  background: var(--tv-panel-strong);
+  border: 1px solid var(--tv-border);
+  border-radius: 8px;
+  color: var(--tv-text-soft);
+  font-size: 0.9rem;
+  font-weight: 800;
+  padding: 8px 12px;
+}
+
+.tv-primary-action {
+  background: var(--tv-teal);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  color: #071312;
+  font-weight: 900;
+  justify-self: start;
+  min-height: 54px;
+  min-width: 156px;
+  padding: 0 22px;
+}
+
+.tv-primary-action:disabled {
+  background: #59656b;
+  color: #d4dbdc;
+}
+
+.tv-error,
+.tv-loading {
+  border-radius: 8px;
+  font-weight: 800;
+  padding: 18px 20px;
+}
+
+.tv-error {
+  background: #2a1210;
+  border: 1px solid #7c332b;
+  color: #ffd9d4;
+}
+
+.tv-loading {
+  background: var(--tv-panel);
+  border: 1px solid var(--tv-border);
+  color: var(--tv-text-soft);
+}
+
+.tv-rows {
+  display: grid;
+  gap: 20px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tv-row {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tv-row-heading {
+  justify-content: space-between;
+}
+
+.tv-row-heading h3 {
+  color: var(--tv-text);
+  font-size: 1.1rem;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.tv-card-row {
+  display: flex;
+  gap: 16px;
+  min-height: 158px;
+  overflow: hidden;
+  padding: 4px 4px 12px;
+}
+
+.tv-card {
+  background: var(--tv-panel);
+  border: 2px solid var(--tv-border);
+  border-radius: 8px;
+  color: inherit;
+  display: grid;
+  flex: 0 0 242px;
+  gap: 8px;
+  grid-template-rows: auto minmax(48px, auto) auto 7px;
+  min-height: 142px;
+  padding: 16px;
+  text-align: left;
+}
+
+.tv-card.selected {
+  background: #fffdf6;
+  border-color: var(--tv-gold);
+  color: #15181b;
+  transform: translateY(-2px);
+}
+
+.tv-card.selected span,
+.tv-card.selected p {
+  color: #59656b;
+}
+
+.tv-card strong {
+  display: -webkit-box;
+  font-size: 1.08rem;
+  font-weight: 900;
+  line-height: 1.12;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.tv-progress {
+  align-self: end;
+  background: rgb(247 244 237 / 20%);
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.tv-card.selected .tv-progress {
+  background: #dfe6e7;
+}
+
+.tv-progress i {
+  background: var(--tv-coral);
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+}
+
+.tv-card:focus,
+.tv-primary-action:focus {
+  outline: 0;
+}
+
+.tv-player-shell {
+  background: #050607;
+  display: grid;
+  height: 100vh;
+  overflow: hidden;
+  place-items: center;
+  position: relative;
+}
+
+.tv-player {
+  background: #000000;
+  height: 100vh;
+  width: 100vw;
+}
+
+.tv-player-info {
+  background: rgb(5 6 7 / 76%);
+  border: 1px solid rgb(247 244 237 / 16%);
+  border-radius: 8px;
+  bottom: 28px;
+  gap: 14px;
+  left: 32px;
+  max-width: calc(100vw - 64px);
+  padding: 12px 14px;
+  position: absolute;
+}
+
+.tv-player-info strong {
+  color: var(--tv-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .tv-shell {
+    gap: 16px;
+    padding: 24px;
+  }
+
+  .tv-hero {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
+
+  .tv-hero-copy h2 {
+    font-size: 2rem;
+  }
+
+  .tv-card {
+    flex-basis: 214px;
+  }
+}

@@ -4,6 +4,7 @@ This repo can build a first-pass Samsung TV app as a packaged Tizen Web app. The
 
 ## What Was Added
 
+- `tv.html`, `src/tv-main.tsx`, and `src/TvApp.tsx` provide a dedicated remote-first TV UI.
 - `public/config.xml` is copied into `dist/` so Tizen tooling can package the Vite build as a `.wgt`.
 - `public/home-media-config.js` sets the desktop media server URL used by the packaged TV app.
 - `public/tizen-icon.png` provides a bitmap launcher icon for the Tizen package.
@@ -12,6 +13,7 @@ This repo can build a first-pass Samsung TV app as a packaged Tizen Web app. The
 - The frontend can use a configured server URL through `VITE_HOME_MEDIA_API_BASE`, `?api=...`, or the in-app settings button.
 - The media API allows LAN/CORS requests and exposes range headers for video playback.
 - The app handles basic Samsung remote-style navigation with arrow keys, back, and media play/pause.
+- `public/config.xml` points the Tizen package at `tv.html`; the desktop browser UI still uses `index.html`.
 
 ## Current Official Tooling
 
@@ -104,9 +106,10 @@ Recommended VS Code flow:
 
 1. Run `npm run build:tv`.
 2. Open `F:\projects\home-media\dist` in VS Code.
-3. Use the command palette and run `Tizen TV: Build Signed Package`.
-4. Connect to the TV from the Tizen TV extension.
-5. Install or launch the generated `.wgt` on the connected TV target.
+3. Confirm `dist/config.xml` contains `<content src="tv.html" />`.
+4. Use the command palette and run `Tizen TV: Build Signed Package`.
+5. Connect to the TV from the Tizen TV extension.
+6. Install or launch the generated `.wgt` on the connected TV target.
 
 CLI fallback:
 
