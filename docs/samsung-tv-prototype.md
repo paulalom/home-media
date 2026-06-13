@@ -58,10 +58,25 @@ If that URL does not load, the TV will not load the library either. Check Window
 ## 2. Install Samsung TV Tooling
 
 1. Install Visual Studio Code.
-2. Install the VS Code extension named `Tizen TV`. The publisher should be `samsungtvsdk`.
-3. In the Tizen extension package manager, install the latest TV extension.
-4. Install the Tizen CLI if the extension prompts for it.
-5. Create a Samsung certificate profile. Keep the author certificate safe because future updates must be signed with the same author certificate.
+2. Install the extension with this exact Marketplace ID:
+
+```powershell
+code --install-extension samsungtvsdk.tv-vscode-tizen
+```
+
+The Marketplace listing is named `Tizen TV Extension`, shows publisher name `Samsung TV SDK`, and uses publisher ID `samsungtvsdk`. It may not show a verified publisher badge in VS Code, but Samsung's own Smart TV documentation links directly to this Marketplace item and says to make sure the publisher is `samsungtvsdk`.
+
+Direct links:
+
+- Samsung doc: https://developer.samsung.com/smarttv/develop/tools/additional-tools/vscode-extension-new.html
+- Marketplace item: https://marketplace.visualstudio.com/items?itemName=samsungtvsdk.tv-vscode-tizen
+
+Avoid the older Marketplace item `tizensdk.tizentv` unless Samsung's docs send us back to it; older Samsung pages still mention it, but the current TV-specific extension page points at `samsungtvsdk.tv-vscode-tizen`.
+
+3. If VS Code installs the required `Tizen Extension` dependency automatically, let it. Its Marketplace ID is `tizen.vscode-tizen-csharp`.
+4. In the Tizen extension package manager, install the latest TV extension.
+5. Install the Tizen CLI if the extension prompts for it.
+6. Create a Samsung certificate profile. Keep the author certificate safe because future updates must be signed with the same author certificate.
 
 ## 3. Enable Developer Mode On The TV
 
