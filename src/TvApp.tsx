@@ -20,6 +20,7 @@ type MediaItem = {
   id: string
   title: string
   category: MediaCategory
+  artworkUrl?: string
   container: string
   browserPlayable: boolean
   relativePath: string
@@ -61,6 +62,7 @@ type TvTitle = {
   id: string
   kind: 'movie' | 'show'
   title: string
+  artworkUrl?: string
   subtitle: string
   source: string
   items: MediaItem[]
@@ -104,6 +106,7 @@ async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
 
 function TvApp() {
   const [apiBase] = useState(readInitialApiBase)
+  const [canLoadArtwork, setCanLoadArtwork] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [focus, setFocus] = useState<FocusPosition>({
     itemIndex: 0,
@@ -116,9 +119,11 @@ function TvApp() {
   )
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const playbackHistoryRef = useRef(playbackHistory)
-  const selectedCardRef = useRef<HTMLButtonElement | null>(null)
-  const playerRef = useRef<HTMLVideoElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
+  const playerRef = useRef<HTMLVideoElement | null>(null)
+  const rowsRef = useRef<HTMLElement | null>(null)
+  const selectedCardRef = useRef<HTMLButtonElement | null>(null)
+  const selectedRowRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     playbackHistoryRef.current = playbackHistory
@@ -127,6 +132,31 @@ function TvApp() {
       JSON.stringify(playbackHistory),
     )
   }, [playbackHistory])
+
+  useEffect(() => {
+    const idleWindow = window as Window & {
+      cancelIdleCallback?: (handle: number) => void
+      requestIdleCallback?: (
+        callback: () => void,
+        options?: { timeout: number },
+      ) => number
+    }
+
+    if (idleWindow.requestIdleCallback) {
+      const idleId = idleWindow.requestIdleCallback(
+        () => setCanLoadArtwork(true),
+        {
+          timeout: 1400,
+        },
+      )
+
+      return () => idleWindow.cancelIdleCallback?.(idleId)
+    }
+
+    const timeoutId = window.setTimeout(() => setCanLoadArtwork(true), 800)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -179,6 +209,28 @@ function TvApp() {
       0,
     )
   }, [safeFocus.itemIndex, safeFocus.sectionIndex])
+
+  useEffect(() => {
+    const rows = rowsRef.current
+    const selectedRow = selectedRowRef.current
+
+    if (!rows || !selectedRow) {
+      return
+    }
+
+    const rowBounds = selectedRow.getBoundingClientRect()
+    const rowsBounds = rows.getBoundingClientRect()
+    const padding = 14
+
+    if (rowBounds.top < rowsBounds.top) {
+      rows.scrollTop -= rowsBounds.top - rowBounds.top + padding
+      return
+    }
+
+    if (rowBounds.bottom > rowsBounds.bottom) {
+      rows.scrollTop += rowBounds.bottom - rowsBounds.bottom + padding
+    }
+  }, [safeFocus.sectionIndex])
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -389,6 +441,15 @@ function TvApp() {
 
       <section className="tv-hero" aria-live="polite">
         <div className="tv-hero-art">
+          {canLoadArtwork && selectedTitle?.artworkUrl ? (
+            <img
+              alt=""
+              decoding="async"
+              loading="lazy"
+              onError={hideFailedArtwork}
+              src={resolveMediaUrl(selectedTitle.artworkUrl, apiBase)}
+            />
+          ) : null}
           <span>{selectedTitle?.kind === 'show' ? 'TV' : 'MOVIE'}</span>
         </div>
         <div className="tv-hero-copy">
@@ -417,54 +478,78 @@ function TvApp() {
       {isLoading ? (
         <section className="tv-loading">Loading library</section>
       ) : sections.length ? (
-        <section className="tv-rows" aria-label="Media rows">
-          {sections.map((section, sectionIndex) => (
-            <section className="tv-row" key={section.id}>
-              <div className="tv-row-heading">
-                <h3>{section.label}</h3>
-                <span>{section.titles.length}</span>
-              </div>
-              <div className="tv-card-row">
-                {section.titles.map((title, itemIndex) => {
-                  const isSelected =
-                    safeFocus.sectionIndex === sectionIndex &&
-                    safeFocus.itemIndex === itemIndex
-                  const playback = title.resumeItem
-                    ? playbackHistory[title.resumeItem.id]
-                    : null
+        <section className="tv-rows" aria-label="Media rows" ref={rowsRef}>
+          {sections.map((section, sectionIndex) => {
+            const shouldLoadArtwork =
+              canLoadArtwork &&
+              Math.abs(sectionIndex - safeFocus.sectionIndex) <= 1
 
-                  return (
-                    <button
-                      className={isSelected ? 'tv-card selected' : 'tv-card'}
-                      key={title.id}
-                      onClick={() => {
-                        setFocus({ itemIndex, sectionIndex })
-                        startPlayback(title.resumeItem)
-                      }}
-                      ref={isSelected ? selectedCardRef : null}
-                      type="button"
-                    >
-                      <span>{title.kind === 'show' ? 'TV' : 'Movie'}</span>
-                      <strong>{title.title}</strong>
-                      <p>{title.subtitle}</p>
-                      {playback && playback.duration > 0 ? (
-                        <div className="tv-progress" aria-hidden="true">
-                          <i
-                            style={{
-                              width: `${Math.min(
-                                (playback.position / playback.duration) * 100,
-                                100,
-                              )}%`,
-                            }}
+            return (
+              <section
+                className="tv-row"
+                key={section.id}
+                ref={
+                  safeFocus.sectionIndex === sectionIndex
+                    ? selectedRowRef
+                    : null
+                }
+              >
+                <div className="tv-row-heading">
+                  <h3>{section.label}</h3>
+                  <span>{section.titles.length}</span>
+                </div>
+                <div className="tv-card-row">
+                  {section.titles.map((title, itemIndex) => {
+                    const isSelected =
+                      safeFocus.sectionIndex === sectionIndex &&
+                      safeFocus.itemIndex === itemIndex
+                    const playback = title.resumeItem
+                      ? playbackHistory[title.resumeItem.id]
+                      : null
+
+                    return (
+                      <button
+                        className={isSelected ? 'tv-card selected' : 'tv-card'}
+                        key={title.id}
+                        onClick={() => {
+                          setFocus({ itemIndex, sectionIndex })
+                          startPlayback(title.resumeItem)
+                        }}
+                        ref={isSelected ? selectedCardRef : null}
+                        type="button"
+                      >
+                        {shouldLoadArtwork && title.artworkUrl ? (
+                          <img
+                            alt=""
+                            className="tv-card-art"
+                            decoding="async"
+                            loading="lazy"
+                            onError={hideFailedArtwork}
+                            src={resolveMediaUrl(title.artworkUrl, apiBase)}
                           />
-                        </div>
-                      ) : null}
-                    </button>
-                  )
-                })}
-              </div>
-            </section>
-          ))}
+                        ) : null}
+                        <span>{title.kind === 'show' ? 'TV' : 'Movie'}</span>
+                        <strong>{title.title}</strong>
+                        <p>{title.subtitle}</p>
+                        {playback && playback.duration > 0 ? (
+                          <div className="tv-progress" aria-hidden="true">
+                            <i
+                              style={{
+                                width: `${Math.min(
+                                  (playback.position / playback.duration) * 100,
+                                  100,
+                                )}%`,
+                              }}
+                            />
+                          </div>
+                        ) : null}
+                      </button>
+                    )
+                  })}
+                </div>
+              </section>
+            )
+          })}
         </section>
       ) : (
         <section className="tv-loading">No playable titles found</section>
@@ -492,17 +577,11 @@ function buildTvSections(
     .filter((title) => title.kind === 'show')
     .sort(sortByTitle)
     .slice(0, maxRowItems)
-  const recentlyAdded = titles.sort(sortByModified).slice(0, maxRowItems)
   const sections: TvSection[] = [
     {
       id: 'continue',
       label: 'Continue',
       titles: continueTitles,
-    },
-    {
-      id: 'recent',
-      label: 'Recently Added',
-      titles: recentlyAdded,
     },
     {
       id: 'movies',
@@ -524,6 +603,7 @@ function buildTvTitles(items: MediaItem[], history: PlaybackHistory) {
     .filter((item) => item.category === 'movie')
     .map<TvTitle>((item) => ({
       id: `movie:${item.id}`,
+      artworkUrl: item.artworkUrl,
       items: [item],
       kind: 'movie',
       lastWatchedAt: history[item.id]?.updatedAt ?? null,
@@ -564,6 +644,7 @@ function buildTvTitles(items: MediaItem[], history: PlaybackHistory) {
 
     return {
       id: `show:${key}`,
+      artworkUrl: sortedEpisodes.find((episode) => episode.artworkUrl)?.artworkUrl,
       items: sortedEpisodes,
       kind: 'show',
       lastWatchedAt: latestWatchedAt,
@@ -675,6 +756,10 @@ function readPlaybackHistory(): PlaybackHistory {
   }
 }
 
+function hideFailedArtwork(event: SyntheticEvent<HTMLImageElement>) {
+  event.currentTarget.hidden = true
+}
+
 function readInitialApiBase() {
   try {
     const params = new URLSearchParams(window.location.search)
@@ -777,13 +862,6 @@ function sortByTitle(first: TvTitle, second: TvTitle) {
 
 function sortByLastWatched(first: TvTitle, second: TvTitle) {
   return (second.lastWatchedAt ?? 0) - (first.lastWatchedAt ?? 0)
-}
-
-function sortByModified(first: TvTitle, second: TvTitle) {
-  return (
-    Math.max(...second.items.map((item) => new Date(item.modifiedAt).getTime())) -
-    Math.max(...first.items.map((item) => new Date(item.modifiedAt).getTime()))
-  )
 }
 
 function sortEpisodes(first: MediaItem, second: MediaItem) {
