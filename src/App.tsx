@@ -1,34 +1,66 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
-  Activity,
-  CheckCircle2,
+  AlertCircle,
   Clapperboard,
   Database,
+  FileVideo,
   FolderSearch,
   HardDrive,
   LayoutGrid,
-  MonitorPlay,
+  LoaderCircle,
   Play,
   Radio,
   RefreshCcw,
   Search,
   Server,
   Settings,
-  ShieldCheck,
   SlidersHorizontal,
   Tv,
-  Wifi,
+  Video,
   type LucideIcon,
 } from 'lucide-react'
 import './App.css'
-import eclipseMarket from './assets/posters/eclipse-market.svg'
-import harborNine from './assets/posters/harbor-nine.svg'
-import nightKitchen from './assets/posters/night-kitchen.svg'
-import northline from './assets/posters/northline.svg'
-import signalRoom from './assets/posters/signal-room.svg'
 
-type MediaType = 'Films' | 'Shows' | 'Music'
-type FilterType = 'All' | MediaType
+type MediaCategory = 'movie' | 'show' | 'other'
+type FilterType = 'Playable' | 'All' | 'Movies' | 'TV' | 'Other'
+
+type MediaItem = {
+  id: string
+  title: string
+  category: MediaCategory
+  container: string
+  browserPlayable: boolean
+  relativePath: string
+  folder: string
+  source: string
+  sizeBytes: number
+  sizeLabel: string
+  modifiedAt: string
+  streamUrl: string
+}
+
+type SourceSummary = {
+  name: string
+  path: string
+  videoCount: number
+  playableCount: number
+  totalBytes: number
+  sizeLabel: string
+}
+
+type LibraryResponse = {
+  summary: {
+    root: string
+    scannedAt: string
+    totalVideos: number
+    playableVideos: number
+    totalBytes: number
+    sizeLabel: string
+    sources: number
+  }
+  sources: SourceSummary[]
+  items: MediaItem[]
+}
 
 type NavItem = {
   label: string
@@ -36,108 +68,171 @@ type NavItem = {
   icon: LucideIcon
 }
 
-const navItems: NavItem[] = [
-  { label: 'Library', count: '1,482', icon: LayoutGrid },
-  { label: 'Watching', count: '6', icon: MonitorPlay },
-  { label: 'Sources', count: '4', icon: HardDrive },
-  { label: 'Devices', count: '9', icon: Tv },
-  { label: 'Activity', count: '18', icon: Activity },
-]
-
-const mediaItems: Array<{
-  title: string
-  type: MediaType
-  year: string
-  quality: string
-  runtime: string
-  progress: number
-  poster: string
-}> = [
-  {
-    title: 'Eclipse Market',
-    type: 'Films',
-    year: '2026',
-    quality: '4K HDR',
-    runtime: '2h 08m',
-    progress: 82,
-    poster: eclipseMarket,
-  },
-  {
-    title: 'Harbor Nine',
-    type: 'Shows',
-    year: 'S2 E4',
-    quality: '1080p',
-    runtime: '42m',
-    progress: 36,
-    poster: harborNine,
-  },
-  {
-    title: 'The Night Kitchen',
-    type: 'Films',
-    year: '2024',
-    quality: '4K',
-    runtime: '1h 47m',
-    progress: 0,
-    poster: nightKitchen,
-  },
-  {
-    title: 'Northline',
-    type: 'Music',
-    year: 'Album',
-    quality: 'FLAC',
-    runtime: '51m',
-    progress: 64,
-    poster: northline,
-  },
-  {
-    title: 'Signal Room',
-    type: 'Shows',
-    year: 'S1 E8',
-    quality: '1080p',
-    runtime: '58m',
-    progress: 14,
-    poster: signalRoom,
-  },
-]
-
-const sources = [
-  { name: 'Movies', path: 'F:/Media/Movies', items: '812 titles', health: 98 },
-  { name: 'Television', path: 'F:/Media/TV', items: '544 seasons', health: 94 },
-  { name: 'Music', path: 'F:/Media/Music', items: '126 albums', health: 100 },
-]
-
-const streams = [
-  { device: 'Living Room', title: 'Eclipse Market', status: 'Direct Play' },
-  { device: 'Kitchen Display', title: 'Harbor Nine', status: 'Transcoding' },
-  { device: 'Tablet', title: 'Northline', status: 'Remote' },
-]
-
-const libraryStats: Array<{
+type StatItem = {
   label: string
   value: string
   icon: LucideIcon
-}> = [
-  { label: 'Indexed titles', value: '1,482', icon: Database },
-  { label: 'Online clients', value: '9', icon: Wifi },
-  { label: 'Storage free', value: '7.8 TB', icon: HardDrive },
-  { label: 'Protected', value: '100%', icon: ShieldCheck },
-]
+}
+
+const filters: FilterType[] = ['Playable', 'All', 'Movies', 'TV', 'Other']
+const categoryLabels: Record<MediaCategory, string> = {
+  movie: 'Movie',
+  other: 'Other',
+  show: 'TV',
+}
+
+async function fetchLibrary(signal?: AbortSignal) {
+  const response = await fetch('/api/library', {
+    cache: 'no-store',
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Library scan failed (${response.status})`)
+  }
+
+  return (await response.json()) as LibraryResponse
+}
 
 function App() {
-  const [activeFilter, setActiveFilter] = useState<FilterType>('All')
+  const [activeFilter, setActiveFilter] = useState<FilterType>('Playable')
+  const [error, setError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [library, setLibrary] = useState<LibraryResponse | null>(null)
+  const [query, setQuery] = useState('')
   const [scanRunning, setScanRunning] = useState(false)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
 
-  const filteredItems = useMemo(
-    () =>
-      activeFilter === 'All'
-        ? mediaItems
-        : mediaItems.filter((item) => item.type === activeFilter),
-    [activeFilter],
-  )
+  useEffect(() => {
+    const controller = new AbortController()
 
-  function startScan() {
+    fetchLibrary(controller.signal)
+      .then((nextLibrary) => {
+        setLibrary(nextLibrary)
+        setSelectedId(getInitialSelection(nextLibrary))
+        setError(null)
+      })
+      .catch((requestError: unknown) => {
+        if (!controller.signal.aborted) {
+          setError(getErrorMessage(requestError))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setIsLoading(false)
+        }
+      })
+
+    return () => controller.abort()
+  }, [])
+
+  const filteredItems = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase()
+
+    return (library?.items ?? []).filter((item) => {
+      const matchesFilter =
+        activeFilter === 'All' ||
+        (activeFilter === 'Playable' && item.browserPlayable) ||
+        (activeFilter === 'Movies' && item.category === 'movie') ||
+        (activeFilter === 'TV' && item.category === 'show') ||
+        (activeFilter === 'Other' && item.category === 'other')
+
+      if (!matchesFilter) {
+        return false
+      }
+
+      if (!normalizedQuery) {
+        return true
+      }
+
+      return `${item.title} ${item.relativePath} ${item.container}`
+        .toLowerCase()
+        .includes(normalizedQuery)
+    })
+  }, [activeFilter, library, query])
+
+  const selectedItem = useMemo(() => {
+    if (!library?.items.length) {
+      return null
+    }
+
+    return (
+      library.items.find((item) => item.id === selectedId) ??
+      filteredItems[0] ??
+      library.items[0]
+    )
+  }, [filteredItems, library, selectedId])
+
+  const navItems: NavItem[] = [
+    {
+      label: 'Library',
+      count: formatNumber(library?.summary.totalVideos ?? 0),
+      icon: LayoutGrid,
+    },
+    {
+      label: 'Playable',
+      count: formatNumber(library?.summary.playableVideos ?? 0),
+      icon: Play,
+    },
+    {
+      label: 'Movies',
+      count: formatNumber(countByCategory(library?.items, 'movie')),
+      icon: Video,
+    },
+    {
+      label: 'TV',
+      count: formatNumber(countByCategory(library?.items, 'show')),
+      icon: Tv,
+    },
+    {
+      label: 'Sources',
+      count: formatNumber(library?.summary.sources ?? 0),
+      icon: HardDrive,
+    },
+  ]
+
+  const libraryStats: StatItem[] = [
+    {
+      label: 'Indexed videos',
+      value: formatNumber(library?.summary.totalVideos ?? 0),
+      icon: Database,
+    },
+    {
+      label: 'Firefox-ready',
+      value: formatNumber(library?.summary.playableVideos ?? 0),
+      icon: Play,
+    },
+    {
+      label: 'Sources',
+      value: formatNumber(library?.summary.sources ?? 0),
+      icon: FolderSearch,
+    },
+    {
+      label: 'Storage indexed',
+      value: library?.summary.sizeLabel ?? '0 B',
+      icon: HardDrive,
+    },
+  ]
+
+  async function startScan() {
     setScanRunning(true)
-    window.setTimeout(() => setScanRunning(false), 1500)
+    setError(null)
+
+    try {
+      const nextLibrary = await fetchLibrary()
+
+      setLibrary(nextLibrary)
+      setSelectedId((currentSelection) =>
+        currentSelection &&
+        nextLibrary.items.some((item) => item.id === currentSelection)
+          ? currentSelection
+          : getInitialSelection(nextLibrary),
+      )
+    } catch (requestError) {
+      setError(getErrorMessage(requestError))
+    } finally {
+      setScanRunning(false)
+    }
   }
 
   return (
@@ -166,7 +261,7 @@ function App() {
               >
                 <Icon size={18} />
                 <span>{item.label}</span>
-                <strong>{item.count}</strong>
+                <strong>{isLoading ? '...' : item.count}</strong>
               </button>
             )
           })}
@@ -177,8 +272,8 @@ function App() {
             <Server size={20} />
           </div>
           <div>
-            <p className="muted">Server</p>
-            <strong>Online</strong>
+            <p className="muted">Source</p>
+            <strong>{library?.summary.root ?? 'F:/media'}</strong>
           </div>
           <span className="status-dot" aria-label="Online" />
         </div>
@@ -188,7 +283,12 @@ function App() {
         <header className="topbar">
           <div className="search-box">
             <Search size={18} />
-            <input aria-label="Search library" placeholder="Search library" />
+            <input
+              aria-label="Search library"
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search library"
+              value={query}
+            />
           </div>
           <div className="topbar-actions">
             <button className="icon-button" title="Filters" type="button">
@@ -209,6 +309,13 @@ function App() {
           </div>
         </header>
 
+        {error ? (
+          <section className="error-banner" role="alert">
+            <AlertCircle size={18} />
+            <span>{error}</span>
+          </section>
+        ) : null}
+
         <section className="stat-grid" aria-label="Library status">
           {libraryStats.map((stat) => {
             const Icon = stat.icon
@@ -217,7 +324,7 @@ function App() {
               <article className="stat-card" key={stat.label}>
                 <Icon size={18} />
                 <span>{stat.label}</span>
-                <strong>{stat.value}</strong>
+                <strong>{isLoading ? '...' : stat.value}</strong>
               </article>
             )
           })}
@@ -227,11 +334,15 @@ function App() {
           <section className="library-panel" aria-labelledby="library-heading">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Recently active</p>
+                <p className="eyebrow">
+                  {library
+                    ? `Scanned ${formatScanTime(library.summary.scannedAt)}`
+                    : 'Scanning source'}
+                </p>
                 <h2 id="library-heading">Library</h2>
               </div>
               <div className="segmented-control" aria-label="Filter library">
-                {(['All', 'Films', 'Shows', 'Music'] as const).map((filter) => (
+                {filters.map((filter) => (
                   <button
                     aria-pressed={activeFilter === filter}
                     className={activeFilter === filter ? 'selected' : ''}
@@ -245,56 +356,107 @@ function App() {
               </div>
             </div>
 
-            <div className="media-grid">
-              {filteredItems.map((item) => (
-                <article className="media-card" key={item.title}>
-                  <img src={item.poster} alt="" />
-                  <div className="media-card-body">
-                    <div>
-                      <p>{item.type}</p>
-                      <h3>{item.title}</h3>
+            {isLoading ? (
+              <div className="empty-state">
+                <LoaderCircle className="spin" size={28} />
+                <p>Scanning F:/media</p>
+              </div>
+            ) : filteredItems.length ? (
+              <div className="media-grid">
+                {filteredItems.map((item) => (
+                  <button
+                    className={
+                      selectedItem?.id === item.id
+                        ? 'media-card selected'
+                        : 'media-card'
+                    }
+                    key={item.id}
+                    onClick={() => setSelectedId(item.id)}
+                    type="button"
+                  >
+                    <div className="media-art">
+                      <FileVideo size={38} />
+                      <span>{item.container}</span>
                     </div>
-                    <dl>
+                    <div className="media-card-body">
                       <div>
-                        <dt>Year</dt>
-                        <dd>{item.year}</dd>
+                        <p>{categoryLabels[item.category]}</p>
+                        <h3>{item.title}</h3>
                       </div>
-                      <div>
-                        <dt>Quality</dt>
-                        <dd>{item.quality}</dd>
-                      </div>
-                      <div>
-                        <dt>Runtime</dt>
-                        <dd>{item.runtime}</dd>
-                      </div>
-                    </dl>
-                    <div className="progress-track" aria-hidden="true">
-                      <span style={{ width: `${item.progress}%` }} />
+                      <dl>
+                        <div>
+                          <dt>Size</dt>
+                          <dd>{item.sizeLabel}</dd>
+                        </div>
+                        <div>
+                          <dt>Source</dt>
+                          <dd>{item.source}</dd>
+                        </div>
+                        <div>
+                          <dt>Playback</dt>
+                          <dd>
+                            {item.browserPlayable ? 'Ready' : 'Indexed'}
+                          </dd>
+                        </div>
+                      </dl>
                     </div>
-                  </div>
-                </article>
-              ))}
-            </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <FileVideo size={30} />
+                <p>No matching videos found</p>
+              </div>
+            )}
           </section>
 
-          <aside className="inspector" aria-label="Server activity">
+          <aside className="inspector" aria-label="Selected media">
             <section className="now-playing">
               <div className="panel-heading compact">
                 <div>
-                  <p className="eyebrow">Now playing</p>
-                  <h2>Eclipse Market</h2>
+                  <p className="eyebrow">Preview</p>
+                  <h2>{selectedItem?.title ?? 'No video selected'}</h2>
                 </div>
-                <button className="round-button" title="Play" type="button">
+                <button
+                  className="round-button"
+                  disabled={!selectedItem?.browserPlayable}
+                  title="Play"
+                  type="button"
+                >
                   <Play fill="currentColor" size={18} />
                 </button>
               </div>
-              <div className="player-frame">
-                <Clapperboard size={42} />
-              </div>
-              <div className="metadata-row">
-                <span>Living Room</span>
-                <strong>4K HDR</strong>
-              </div>
+
+              {selectedItem ? (
+                selectedItem.browserPlayable ? (
+                  <video
+                    className="media-player"
+                    controls
+                    key={selectedItem.id}
+                    preload="metadata"
+                    src={selectedItem.streamUrl}
+                  />
+                ) : (
+                  <div className="player-frame unavailable">
+                    <Clapperboard size={42} />
+                    <p>{selectedItem.container} indexed</p>
+                    <span>Firefox needs a playable container</span>
+                  </div>
+                )
+              ) : (
+                <div className="player-frame unavailable">
+                  <Clapperboard size={42} />
+                  <p>No video selected</p>
+                </div>
+              )}
+
+              {selectedItem ? (
+                <div className="metadata-row">
+                  <span>{categoryLabels[selectedItem.category]}</span>
+                  <strong>{selectedItem.container}</strong>
+                </div>
+              ) : null}
             </section>
 
             <section>
@@ -303,16 +465,17 @@ function App() {
                 <FolderSearch size={19} />
               </div>
               <div className="source-list">
-                {sources.map((source) => (
-                  <article className="source-row" key={source.name}>
+                {(library?.sources ?? []).map((source) => (
+                  <article className="source-row" key={source.path}>
                     <div>
                       <strong>{source.name}</strong>
                       <span>{source.path}</span>
                     </div>
-                    <p>{source.items}</p>
-                    <div className="progress-track" aria-hidden="true">
-                      <span style={{ width: `${source.health}%` }} />
-                    </div>
+                    <p>
+                      {formatNumber(source.videoCount)} videos -{' '}
+                      {formatNumber(source.playableCount)} ready -{' '}
+                      {source.sizeLabel}
+                    </p>
                   </article>
                 ))}
               </div>
@@ -320,27 +483,69 @@ function App() {
 
             <section>
               <div className="panel-heading compact">
-                <h2>Streams</h2>
-                <CheckCircle2 size={19} />
+                <h2>File</h2>
+                <HardDrive size={19} />
               </div>
-              <div className="stream-list">
-                {streams.map((stream) => (
-                  <article className="stream-row" key={stream.device}>
-                    <MonitorPlay size={18} />
-                    <div>
-                      <strong>{stream.device}</strong>
-                      <span>{stream.title}</span>
-                    </div>
-                    <p>{stream.status}</p>
-                  </article>
-                ))}
-              </div>
+              {selectedItem ? (
+                <dl className="detail-list">
+                  <div>
+                    <dt>Folder</dt>
+                    <dd>{selectedItem.folder || selectedItem.source}</dd>
+                  </div>
+                  <div>
+                    <dt>Path</dt>
+                    <dd>{selectedItem.relativePath}</dd>
+                  </div>
+                  <div>
+                    <dt>Updated</dt>
+                    <dd>{formatDate(selectedItem.modifiedAt)}</dd>
+                  </div>
+                </dl>
+              ) : (
+                <div className="empty-state compact">
+                  <p>No file selected</p>
+                </div>
+              )}
             </section>
           </aside>
         </section>
       </section>
     </main>
   )
+}
+
+function countByCategory(items: MediaItem[] | undefined, category: MediaCategory) {
+  return items?.filter((item) => item.category === category).length ?? 0
+}
+
+function getInitialSelection(library: LibraryResponse) {
+  return (
+    library.items.find((item) => item.browserPlayable)?.id ??
+    library.items[0]?.id ??
+    null
+  )
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'Unexpected error'
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat().format(value)
+}
+
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value))
+}
+
+function formatScanTime(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(value))
 }
 
 export default App
