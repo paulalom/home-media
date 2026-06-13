@@ -26,6 +26,10 @@ export type MediaItem = {
   sizeLabel: string
   modifiedAt: string
   streamUrl: string
+  showTitle?: string
+  seasonNumber?: number
+  episodeNumber?: number
+  episodeTitle?: string
 }
 
 export type SourceSummary = {
@@ -231,10 +235,11 @@ async function collectMediaFiles(
     const sourceName = getSourceName(relativePath)
     const sourcePath = join(root, sourceName)
     const browserPlayable = BROWSER_PLAYABLE_EXTENSIONS.has(extension)
+    const mediaMetadata = getMediaMetadata(relativePath, entry.name, extension)
     const item: MediaItem = {
       id: encodeMediaId(relativePath),
-      title: cleanTitle(basename(entry.name, extension)),
-      category: classifyMedia(relativePath),
+      title: mediaMetadata.title,
+      category: mediaMetadata.category,
       container: extension.replace('.', '').toUpperCase(),
       browserPlayable,
       relativePath,
@@ -246,6 +251,10 @@ async function collectMediaFiles(
       streamUrl: `/api/media/${encodeURIComponent(
         encodeMediaId(relativePath),
       )}/stream`,
+      showTitle: mediaMetadata.showTitle,
+      seasonNumber: mediaMetadata.seasonNumber,
+      episodeNumber: mediaMetadata.episodeNumber,
+      episodeTitle: mediaMetadata.episodeTitle,
     }
 
     items.push(item)
@@ -453,18 +462,104 @@ function getSourceName(relativePath: string) {
   return relativePath.split(/[\\/]/)[0] || 'Library'
 }
 
-function classifyMedia(relativePath: string): MediaCategory {
-  const lowerPath = relativePath.toLowerCase()
+function getMediaMetadata(
+  relativePath: string,
+  filename: string,
+  extension: string,
+): Pick<
+  MediaItem,
+  | 'category'
+  | 'episodeNumber'
+  | 'episodeTitle'
+  | 'seasonNumber'
+  | 'showTitle'
+  | 'title'
+> {
+  const sourceName = getSourceName(relativePath)
+  const sourceKey = sourceName.toLowerCase()
+  const pathParts = relativePath.split(/[\\/]/)
 
-  if (lowerPath.includes('tv show') || lowerPath.includes('season ')) {
-    return 'show'
+  if (sourceKey === 'tv shows' || sourceKey === 'tv') {
+    const showTitle = cleanTitle(pathParts[1] ?? basename(filename, extension))
+    const episodeNumbers = parseEpisodeNumbers(filename)
+    const episodeTitle = getEpisodeTitle(
+      basename(filename, extension),
+      showTitle,
+      episodeNumbers,
+    )
+
+    return {
+      category: 'show',
+      episodeNumber: episodeNumbers?.episodeNumber,
+      episodeTitle,
+      seasonNumber: episodeNumbers?.seasonNumber,
+      showTitle,
+      title: episodeTitle,
+    }
   }
 
-  if (lowerPath.includes('movie')) {
-    return 'movie'
+  if (sourceKey === 'movies' || sourceKey === 'movie') {
+    return {
+      category: 'movie',
+      title: getMovieTitle(relativePath, filename, extension),
+    }
   }
 
-  return 'other'
+  return {
+    category: 'other',
+    title: cleanTitle(basename(filename, extension)),
+  }
+}
+
+function getMovieTitle(
+  relativePath: string,
+  filename: string,
+  extension: string,
+) {
+  const pathParts = relativePath.split(/[\\/]/)
+
+  if (pathParts.length > 2) {
+    return cleanTitle(pathParts[1])
+  }
+
+  return cleanTitle(basename(filename, extension))
+}
+
+function parseEpisodeNumbers(filename: string) {
+  const match =
+    /\bS(?<season>\d{1,2})E(?<episode>\d{1,3})\b/i.exec(filename) ??
+    /\b(?<season>\d{1,2})x(?<episode>\d{1,3})\b/i.exec(filename)
+
+  if (!match?.groups) {
+    return null
+  }
+
+  return {
+    episodeNumber: Number(match.groups.episode),
+    seasonNumber: Number(match.groups.season),
+  }
+}
+
+function getEpisodeTitle(
+  filenameWithoutExtension: string,
+  showTitle: string,
+  episodeNumbers: ReturnType<typeof parseEpisodeNumbers>,
+) {
+  const cleanedFilename = cleanTitle(filenameWithoutExtension)
+  let episodeTitle = cleanedFilename
+    .replace(new RegExp(`^${escapeRegExp(showTitle)}\\s*`, 'i'), '')
+    .replace(/\bS\d{1,2}E\d{1,3}\b/i, '')
+    .replace(/\b\d{1,2}x\d{1,3}\b/i, '')
+    .replace(/\b\d{3,4}p\b.*$/i, '')
+    .replace(/\b(?:BluRay|WEBRip|WEB-DL|x264|x265|HEVC|AAC|DD5)\b.*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!episodeTitle && episodeNumbers) {
+    episodeTitle = `Episode ${episodeNumbers.episodeNumber}`
+  }
+
+  return episodeTitle || cleanedFilename
 }
 
 function cleanTitle(name: string) {
@@ -473,6 +568,10 @@ function cleanTitle(name: string) {
     .replace(/\s+/g, ' ')
     .replace(/\s+-\s+$/, '')
     .trim()
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function formatBytes(bytes: number) {

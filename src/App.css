@@ -21,6 +21,7 @@
 .search-box,
 .stat-card,
 .panel-heading,
+.section-heading,
 .segmented-control,
 .metadata-row,
 .stream-row {
@@ -272,6 +273,36 @@ dt {
   font-size: 1.15rem;
 }
 
+.title-sections {
+  display: grid;
+  gap: 24px;
+}
+
+.media-section {
+  display: grid;
+  gap: 12px;
+}
+
+.section-heading {
+  justify-content: space-between;
+}
+
+.section-heading h3,
+.section-heading span {
+  margin: 0;
+}
+
+.section-heading h3 {
+  color: var(--text-strong);
+  font-size: 1rem;
+}
+
+.section-heading span {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
 .segmented-control {
   background: #edf1f2;
   border-radius: 8px;
@@ -337,6 +368,12 @@ dt {
   justify-content: center;
   position: relative;
   width: 100%;
+}
+
+.media-art.show-art {
+  background:
+    linear-gradient(145deg, rgb(23 24 27 / 92%), rgb(232 93 79 / 76%)),
+    #17181b;
 }
 
 .media-art span {
@@ -473,6 +510,17 @@ dt {
   color: var(--text-strong);
 }
 
+.resume-note {
+  background: #edf7f5;
+  border: 1px solid #c5e4de;
+  border-radius: 8px;
+  color: #0f766e;
+  font-size: 0.86rem;
+  font-weight: 800;
+  margin-top: 12px;
+  padding: 9px 10px;
+}
+
 .source-list,
 .stream-list {
   display: grid;
@@ -521,6 +569,62 @@ dt {
   color: var(--text-strong);
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+
+.episode-list,
+.season-group {
+  display: grid;
+  gap: 10px;
+}
+
+.episode-list {
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.season-group {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.season-group:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.episode-row {
+  background: #f9fafb;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: inherit;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: 58px minmax(0, 1fr) auto;
+  min-height: 54px;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.episode-row.selected,
+.episode-row:hover {
+  border-color: #0f766e;
+}
+
+.episode-row span,
+.episode-row p {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-weight: 800;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.episode-row strong {
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .empty-state {

@@ -5,9 +5,10 @@ Home Media is a new local-first media server project intended to replace a Plex-
 ## Current Shape
 
 - Vite, React, and TypeScript frontend.
-- Local mock library data for films, shows, music, sources, streams, and server status.
-- Responsive app shell that starts on the media dashboard instead of a marketing page.
-- Local cover-art assets under `src/assets/posters`.
+- Local Vite middleware API that scans `F:/media` for video files.
+- Byte-range media streaming endpoint for browser playback.
+- Movies and TV shows grouped as title-level library entries.
+- Browser-local resume history for recently watched movies and shows.
 
 ## Scripts
 
@@ -20,12 +21,12 @@ npm run build
 
 ## Next Milestones
 
-1. Add a Node service for library scanning and metadata persistence.
-2. Store media sources, title metadata, and playback sessions in SQLite.
-3. Add file-system watchers for incremental scans.
-4. Prototype playback and stream routing.
+1. Store media sources, title metadata, and playback sessions in SQLite.
+2. Add file-system watchers for incremental scans.
+3. Add poster/metadata matching.
+4. Add transcoding for containers Firefox cannot play directly.
 5. Add authentication and per-device access controls.
 
 ## Project Notes
 
-The project currently uses mock data only. It is ready for the backend shape to be added without reworking the app surface.
+The project currently defaults to `F:/media`. Set `HOME_MEDIA_ROOT` before starting Vite to point the scanner at another folder.
