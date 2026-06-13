@@ -20,7 +20,6 @@ import {
   Search,
   Server,
   Settings,
-  SlidersHorizontal,
   Tv,
   Video,
   type LucideIcon,
@@ -253,8 +252,9 @@ function App() {
 
   const selectedTitle = useMemo(
     () =>
-      collections.all.find((title) => title.id === selectedTitleId) ??
-      getInitialSelection(collections),
+      selectedTitleId
+        ? collections.all.find((title) => title.id === selectedTitleId) ?? null
+        : null,
     [collections, selectedTitleId],
   )
 
@@ -262,14 +262,12 @@ function App() {
   const selectedPlayback = selectedItem
     ? playbackHistory[selectedItem.id] ?? null
     : null
-  const recentMovies = collections.movies
-    .filter((title) => title.lastWatchedAt)
-    .sort(sortByLastWatched)
-  const recentShows = collections.shows
-    .filter((title) => title.lastWatchedAt)
-    .sort(sortByLastWatched)
-  const filteredMovies = filterTitles(collections.movies, query)
-  const filteredShows = filterTitles(collections.shows, query)
+  const visibleTitles = getTitlesForView(collections, activeView, query)
+  const titleOptions =
+    selectedTitle &&
+    !visibleTitles.some((title) => title.id === selectedTitle.id)
+      ? [selectedTitle, ...visibleTitles]
+      : visibleTitles
 
   const navItems: NavItem[] = [
     {
@@ -365,6 +363,38 @@ function App() {
     setSelectedEpisodeId(episode.id)
   }
 
+  function changeView(nextView: ViewMode) {
+    setActiveView(nextView)
+
+    const nextTitle = getTitlesForView(collections, nextView, query)[0]
+
+    if (nextTitle) {
+      selectTitle(nextTitle)
+    } else {
+      selectTitle(null)
+    }
+  }
+
+  function changeQuery(nextQuery: string) {
+    setQuery(nextQuery)
+
+    const nextTitle = getTitlesForView(collections, activeView, nextQuery)[0]
+
+    if (nextTitle) {
+      selectTitle(nextTitle)
+    } else if (nextQuery.trim()) {
+      selectTitle(null)
+    }
+  }
+
+  function selectTitleById(titleId: string) {
+    const nextTitle = titleOptions.find((title) => title.id === titleId)
+
+    if (nextTitle) {
+      selectTitle(nextTitle)
+    }
+  }
+
   function playSelectedItem() {
     void playerRef.current?.play()
   }
@@ -458,7 +488,7 @@ function App() {
                   activeView === item.mode ? 'nav-item active' : 'nav-item'
                 }
                 key={item.label}
-                onClick={() => setActiveView(item.mode)}
+                onClick={() => changeView(item.mode)}
                 title={item.label}
                 type="button"
               >
@@ -488,15 +518,12 @@ function App() {
             <Search size={18} />
             <input
               aria-label="Search library"
-              onChange={(event) => setQuery(event.target.value)}
+              onChange={(event) => changeQuery(event.target.value)}
               placeholder="Search titles"
               value={query}
             />
           </div>
           <div className="topbar-actions">
-            <button className="icon-button" title="Filters" type="button">
-              <SlidersHorizontal size={19} />
-            </button>
             <button
               className="icon-button"
               onClick={() => {
@@ -583,7 +610,7 @@ function App() {
                     aria-pressed={activeView === mode}
                     className={activeView === mode ? 'selected' : ''}
                     key={mode}
-                    onClick={() => setActiveView(mode)}
+                    onClick={() => changeView(mode)}
                     type="button"
                   >
                     {mode}
@@ -601,6 +628,20 @@ function App() {
                     </p>
                     <h3>{selectedTitle.title}</h3>
                     <span>{getPlaybackLabel(selectedTitle, selectedItem)}</span>
+                  </div>
+                  <div className="title-picker">
+                    <select
+                      aria-label="Select title"
+                      onChange={(event) => selectTitleById(event.target.value)}
+                      value={selectedTitle.id}
+                    >
+                      {titleOptions.map((title) => (
+                        <option key={title.id} value={title.id}>
+                          {title.title}
+                        </option>
+                      ))}
+                    </select>
+                    <span>{formatNumber(visibleTitles.length)} titles</span>
                   </div>
                   <div className="main-player-actions">
                     <button
@@ -725,181 +766,16 @@ function App() {
                 <LoaderCircle className="spin" size={28} />
                 <p>Scanning F:/media</p>
               </div>
-            ) : query.trim() ? (
-              <TitleSection
-                emptyLabel="No matching titles found"
-                history={playbackHistory}
-                onSelect={selectTitle}
-                selectedTitleId={selectedTitle?.id ?? null}
-                title="Search results"
-                titles={[...filteredMovies, ...filteredShows]}
-              />
-            ) : activeView === 'Movies' ? (
-              <TitleSection
-                emptyLabel="No movies found"
-                history={playbackHistory}
-                onSelect={selectTitle}
-                selectedTitleId={selectedTitle?.id ?? null}
-                title="Movies"
-                titles={collections.movies}
-              />
-            ) : activeView === 'TV Shows' ? (
-              <TitleSection
-                emptyLabel="No TV shows found"
-                history={playbackHistory}
-                onSelect={selectTitle}
-                selectedTitleId={selectedTitle?.id ?? null}
-                title="TV Shows"
-                titles={collections.shows}
-              />
-            ) : (
-              <div className="title-sections">
-                <TitleSection
-                  history={playbackHistory}
-                  onSelect={selectTitle}
-                  selectedTitleId={selectedTitle?.id ?? null}
-                  title="Recently watched TV"
-                  titles={recentShows}
-                />
-                <TitleSection
-                  history={playbackHistory}
-                  onSelect={selectTitle}
-                  selectedTitleId={selectedTitle?.id ?? null}
-                  title="Recently watched movies"
-                  titles={recentMovies}
-                />
-                <TitleSection
-                  history={playbackHistory}
-                  limit={12}
-                  onSelect={selectTitle}
-                  selectedTitleId={selectedTitle?.id ?? null}
-                  title="Movies"
-                  titles={collections.movies}
-                />
-                <TitleSection
-                  history={playbackHistory}
-                  limit={12}
-                  onSelect={selectTitle}
-                  selectedTitleId={selectedTitle?.id ?? null}
-                  title="TV Shows"
-                  titles={collections.shows}
-                />
+            ) : !selectedTitle ? (
+              <div className="empty-state">
+                <FileVideo size={30} />
+                <p>No titles found</p>
               </div>
-            )}
+            ) : null}
           </section>
         </section>
       </section>
     </main>
-  )
-}
-
-function TitleSection({
-  emptyLabel,
-  history,
-  limit,
-  onSelect,
-  selectedTitleId,
-  title,
-  titles,
-}: {
-  emptyLabel?: string
-  history: PlaybackHistory
-  limit?: number
-  onSelect: (title: LibraryTitle) => void
-  selectedTitleId: string | null
-  title: string
-  titles: LibraryTitle[]
-}) {
-  const visibleTitles = typeof limit === 'number' ? titles.slice(0, limit) : titles
-
-  if (!visibleTitles.length && !emptyLabel) {
-    return null
-  }
-
-  return (
-    <section className="media-section" aria-label={title}>
-      <div className="section-heading">
-        <h3>{title}</h3>
-        <span>{formatNumber(titles.length)}</span>
-      </div>
-
-      {visibleTitles.length ? (
-        <div className="media-grid">
-          {visibleTitles.map((item) => (
-            <TitleCard
-              history={history}
-              isSelected={item.id === selectedTitleId}
-              key={item.id}
-              onSelect={onSelect}
-              title={item}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="empty-state compact">
-          <FileVideo size={28} />
-          <p>{emptyLabel}</p>
-        </div>
-      )}
-    </section>
-  )
-}
-
-function TitleCard({
-  history,
-  isSelected,
-  onSelect,
-  title,
-}: {
-  history: PlaybackHistory
-  isSelected: boolean
-  onSelect: (title: LibraryTitle) => void
-  title: LibraryTitle
-}) {
-  const resumeItem = getResumeItem(title, history)
-  const record = resumeItem ? history[resumeItem.id] : null
-  const progress =
-    record && record.duration > 0
-      ? Math.min((record.position / record.duration) * 100, 100)
-      : 0
-  const Icon = title.kind === 'show' ? Tv : Video
-
-  return (
-    <button
-      className={isSelected ? 'media-card selected' : 'media-card'}
-      onClick={() => onSelect(title)}
-      type="button"
-    >
-      <div className={title.kind === 'show' ? 'media-art show-art' : 'media-art'}>
-        <Icon size={38} />
-        <span>{getCardBadge(title)}</span>
-      </div>
-      <div className="media-card-body">
-        <div>
-          <p>{getTitleKindLabel(title)}</p>
-          <h3>{title.title}</h3>
-        </div>
-        <dl>
-          <div>
-            <dt>{title.kind === 'show' ? 'Episodes' : 'Size'}</dt>
-            <dd>{title.kind === 'show' ? title.episodeCount : title.item.sizeLabel}</dd>
-          </div>
-          <div>
-            <dt>Source</dt>
-            <dd>{title.kind === 'show' ? title.source : title.item.source}</dd>
-          </div>
-          <div>
-            <dt>Playback</dt>
-            <dd>{resumeItem?.browserPlayable ? 'Ready' : 'Indexed'}</dd>
-          </div>
-        </dl>
-        {progress > 0 ? (
-          <div className="progress-track" aria-hidden="true">
-            <span style={{ width: `${progress}%` }} />
-          </div>
-        ) : null}
-      </div>
-    </button>
   )
 }
 
@@ -1063,6 +939,34 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
     .find((episode) => episode.browserPlayable)
 
   return nextEpisode ?? watchedEpisode
+}
+
+function getTitlesForView(
+  collections: LibraryCollections,
+  activeView: ViewMode,
+  query: string,
+) {
+  if (query.trim()) {
+    return filterTitles(collections.all, query).sort(sortByTitle)
+  }
+
+  if (activeView === 'Movies') {
+    return collections.movies
+  }
+
+  if (activeView === 'TV Shows') {
+    return collections.shows
+  }
+
+  const recentTitles = collections.all
+    .filter((title) => title.lastWatchedAt)
+    .sort(sortByLastWatched)
+  const recentIds = new Set(recentTitles.map((title) => title.id))
+
+  return [
+    ...recentTitles,
+    ...collections.all.filter((title) => !recentIds.has(title.id)),
+  ]
 }
 
 function filterTitles<T extends LibraryTitle>(titles: T[], query: string) {
@@ -1258,14 +1162,6 @@ function getResumePosition(record: PlaybackRecord | null, duration: number) {
   }
 
   return Math.max(record.position - 3, 0)
-}
-
-function getCardBadge(title: LibraryTitle) {
-  if (title.kind === 'show') {
-    return `${title.episodeCount} eps`
-  }
-
-  return title.item.container
 }
 
 function getTitleKindLabel(title: LibraryTitle) {
