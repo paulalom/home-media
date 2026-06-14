@@ -95,6 +95,15 @@ type PlayerClock = {
   position: number
 }
 
+type ScanDirection = -1 | 1
+
+type ScanPreview = {
+  direction: ScanDirection
+  position: number
+  scanning: boolean
+  speedIndex: number
+}
+
 type ActionMenuState =
   | {
       kind: 'episode'
@@ -134,6 +143,11 @@ const apiBaseStorageKey = 'home-media-api-base-v1'
 const playbackStorageKey = 'home-media-playback-v1'
 const maxRowItems = 28
 const playerHudHideDelayMs = 1000
+const playerSeekStepSeconds = 5
+const scanHoldDelayMs = 320
+const scanPreviewBaseSecondsPerSecond = 5
+const scanPreviewTickMs = 120
+const scanSpeedMultipliers = [2, 3, 4] as const
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
 
 async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
@@ -171,12 +185,19 @@ function TvApp() {
   })
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
+  const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null)
   const playbackHistoryRef = useRef(playbackHistory)
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
   const playerHudTimeoutRef = useRef<number | null>(null)
+  const playerScanHeldDirectionRef = useRef<ScanDirection | null>(null)
+  const playerScanHoldTimeoutRef = useRef<number | null>(null)
+  const playerScanIntervalRef = useRef<number | null>(null)
+  const playerScanLastTickRef = useRef<number | null>(null)
+  const playerScanPreviewRef = useRef<ScanPreview | null>(null)
   const playerRef = useRef<HTMLVideoElement | null>(null)
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
   const selectedCardRef = useRef<HTMLButtonElement | null>(null)
   const selectedRowRef = useRef<HTMLElement | null>(null)
@@ -194,8 +215,53 @@ function TvApp() {
       if (playerHudTimeoutRef.current !== null) {
         window.clearTimeout(playerHudTimeoutRef.current)
       }
+
+      if (playerScanHoldTimeoutRef.current !== null) {
+        window.clearTimeout(playerScanHoldTimeoutRef.current)
+      }
+
+      if (playerScanIntervalRef.current !== null) {
+        window.clearInterval(playerScanIntervalRef.current)
+      }
+
+      playerScanHeldDirectionRef.current = null
+      playerScanHoldTimeoutRef.current = null
+      playerScanIntervalRef.current = null
+      playerScanLastTickRef.current = null
+      playerScanPreviewRef.current = null
     }
   }, [])
+
+  useEffect(() => {
+    playerScanPreviewRef.current = scanPreview
+  }, [scanPreview])
+
+  useEffect(() => {
+    if (!scanPreview) {
+      return
+    }
+
+    const previewVideo = previewVideoRef.current
+
+    if (!previewVideo || previewVideo.readyState < 1) {
+      return
+    }
+
+    const previewDuration = getFiniteVideoDuration(previewVideo)
+    const nextPosition = previewDuration
+      ? clamp(scanPreview.position, 0, previewDuration)
+      : scanPreview.position
+
+    if (Math.abs(previewVideo.currentTime - nextPosition) < 0.25) {
+      return
+    }
+
+    try {
+      previewVideo.currentTime = nextPosition
+    } catch {
+      // Some TV runtimes reject rapid preview seeks until metadata is ready.
+    }
+  }, [playerItem?.id, scanPreview])
 
   useEffect(() => {
     registerSamsungRemoteKeys()
@@ -444,23 +510,40 @@ function TvApp() {
     }
   }
 
-  function handlePlayerAction(action: RemoteAction) {
+  function handlePlayerAction(action: RemoteAction, event: KeyboardEvent) {
     if (action === 'back') {
+      if (playerScanPreviewRef.current) {
+        cancelScanPreview()
+        return
+      }
+
       closePlayer()
       return
     }
 
     if (action === 'play') {
+      cancelScanPreview()
       playPlayer()
       return
     }
 
     if (action === 'pause') {
+      cancelScanPreview()
       pausePlayer()
       return
     }
 
-    if (action === 'enter' || action === 'playPause') {
+    if (action === 'enter') {
+      if (commitScanPreview()) {
+        return
+      }
+
+      togglePlayer()
+      return
+    }
+
+    if (action === 'playPause') {
+      cancelScanPreview()
       togglePlayer()
       return
     }
@@ -469,7 +552,7 @@ function TvApp() {
       action === 'right' ||
       action === 'left'
     ) {
-      skipPlayer(action === 'right' ? 30 : -10)
+      handlePlayerScanKeyDown(action === 'right' ? 1 : -1, event.repeat)
     }
   }
 
@@ -665,6 +748,7 @@ function TvApp() {
       return
     }
 
+    clearScanPreview()
     clearPlayerHudTimeout()
     setPlayerClock({
       duration: 0,
@@ -680,6 +764,7 @@ function TvApp() {
       playerRef.current.pause()
     }
 
+    clearScanPreview()
     clearPlayerHudTimeout()
     setPlayerItem(null)
   }
@@ -714,6 +799,213 @@ function TvApp() {
     }
   }
 
+  function handlePlayerScanKeyDown(
+    direction: ScanDirection,
+    isRepeat: boolean,
+  ) {
+    if (isRepeat) {
+      if (
+        playerScanHeldDirectionRef.current === direction &&
+        !playerScanPreviewRef.current
+      ) {
+        beginScanPreview(direction, false)
+      }
+
+      return
+    }
+
+    playerScanHeldDirectionRef.current = direction
+
+    if (playerScanPreviewRef.current) {
+      beginScanPreview(direction, true)
+      return
+    }
+
+    clearScanHoldTimeout()
+    playerScanHoldTimeoutRef.current = window.setTimeout(() => {
+      playerScanHoldTimeoutRef.current = null
+      beginScanPreview(direction, false)
+    }, scanHoldDelayMs)
+  }
+
+  function handlePlayerScanKeyUp(direction: ScanDirection) {
+    if (playerScanHeldDirectionRef.current !== direction) {
+      return
+    }
+
+    playerScanHeldDirectionRef.current = null
+
+    if (playerScanHoldTimeoutRef.current !== null) {
+      clearScanHoldTimeout()
+      skipPlayer(direction * playerSeekStepSeconds)
+      return
+    }
+
+    const preview = playerScanPreviewRef.current
+
+    if (!preview) {
+      return
+    }
+
+    setScanPreviewState({
+      ...preview,
+      scanning: false,
+    })
+    stopScanPreviewTicker()
+  }
+
+  function beginScanPreview(
+    direction: ScanDirection,
+    advanceStage: boolean,
+  ) {
+    const player = playerRef.current
+
+    if (!player) {
+      return
+    }
+
+    const duration = getFiniteVideoDuration(player)
+
+    if (!duration) {
+      skipPlayer(direction * playerSeekStepSeconds)
+      return
+    }
+
+    clearScanHoldTimeout()
+
+    const currentPreview = playerScanPreviewRef.current
+    const nextSpeedIndex =
+      currentPreview && advanceStage
+        ? getNextScanSpeedIndex(currentPreview, direction)
+        : currentPreview?.speedIndex ?? 0
+    const nextPreview = {
+      direction,
+      position: clamp(currentPreview?.position ?? player.currentTime, 0, duration),
+      scanning: true,
+      speedIndex: nextSpeedIndex,
+    }
+
+    setScanPreviewState(nextPreview)
+    playerScanLastTickRef.current = window.performance.now()
+    startScanPreviewTicker()
+    showPlayerHud()
+  }
+
+  function commitScanPreview() {
+    const player = playerRef.current
+    const preview = playerScanPreviewRef.current
+
+    if (!player || !preview) {
+      return false
+    }
+
+    const duration = getFiniteVideoDuration(player)
+    const nextPosition = clamp(preview.position, 0, duration || preview.position)
+
+    player.currentTime = nextPosition
+    updatePlayerClockFromValues(duration, nextPosition)
+    clearScanPreview()
+    showPlayerHud(!player.paused && !player.ended)
+
+    return true
+  }
+
+  function cancelScanPreview() {
+    if (!playerScanPreviewRef.current && playerScanHoldTimeoutRef.current === null) {
+      return
+    }
+
+    clearScanPreview()
+    showPlayerHud()
+  }
+
+  function clearScanPreview(resetState = true) {
+    clearScanHoldTimeout()
+    stopScanPreviewTicker()
+    playerScanHeldDirectionRef.current = null
+
+    if (resetState) {
+      setScanPreviewState(null)
+    } else {
+      playerScanPreviewRef.current = null
+    }
+  }
+
+  function clearScanHoldTimeout() {
+    if (playerScanHoldTimeoutRef.current === null) {
+      return
+    }
+
+    window.clearTimeout(playerScanHoldTimeoutRef.current)
+    playerScanHoldTimeoutRef.current = null
+  }
+
+  function startScanPreviewTicker() {
+    if (playerScanIntervalRef.current !== null) {
+      return
+    }
+
+    playerScanIntervalRef.current = window.setInterval(
+      updateScanPreviewPosition,
+      scanPreviewTickMs,
+    )
+  }
+
+  function stopScanPreviewTicker() {
+    if (playerScanIntervalRef.current === null) {
+      return
+    }
+
+    window.clearInterval(playerScanIntervalRef.current)
+    playerScanIntervalRef.current = null
+    playerScanLastTickRef.current = null
+  }
+
+  function updateScanPreviewPosition() {
+    const player = playerRef.current
+    const preview = playerScanPreviewRef.current
+
+    if (!player || !preview?.scanning) {
+      return
+    }
+
+    const duration = getFiniteVideoDuration(player)
+
+    if (!duration) {
+      stopScanPreviewTicker()
+      return
+    }
+
+    const now = window.performance.now()
+    const previousTick = playerScanLastTickRef.current ?? now
+    const elapsedSeconds = (now - previousTick) / 1000
+    const speed =
+      scanSpeedMultipliers[preview.speedIndex] *
+      scanPreviewBaseSecondsPerSecond
+    const nextPosition = clamp(
+      preview.position + preview.direction * speed * elapsedSeconds,
+      0,
+      duration,
+    )
+    const reachedBoundary = nextPosition === 0 || nextPosition === duration
+
+    playerScanLastTickRef.current = now
+    setScanPreviewState({
+      ...preview,
+      position: nextPosition,
+      scanning: !reachedBoundary,
+    })
+
+    if (reachedBoundary) {
+      stopScanPreviewTicker()
+    }
+  }
+
+  function setScanPreviewState(nextPreview: ScanPreview | null) {
+    playerScanPreviewRef.current = nextPreview
+    setScanPreview(nextPreview)
+  }
+
   function skipPlayer(seconds: number) {
     const player = playerRef.current
 
@@ -721,10 +1013,12 @@ function TvApp() {
       return
     }
 
+    const duration = getFiniteVideoDuration(player)
+
     player.currentTime = clamp(
       player.currentTime + seconds,
       0,
-      Number.isFinite(player.duration) ? player.duration : player.currentTime,
+      duration || player.currentTime,
     )
     updatePlayerClock(player)
     showPlayerHud(!player.paused && !player.ended)
@@ -750,9 +1044,16 @@ function TvApp() {
   }
 
   function updatePlayerClock(video: HTMLVideoElement) {
+    updatePlayerClockFromValues(
+      getFiniteVideoDuration(video),
+      Number.isFinite(video.currentTime) ? video.currentTime : 0,
+    )
+  }
+
+  function updatePlayerClockFromValues(duration: number, position: number) {
     setPlayerClock({
-      duration: Number.isFinite(video.duration) ? video.duration : 0,
-      position: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+      duration,
+      position,
     })
   }
 
@@ -825,7 +1126,7 @@ function TvApp() {
       }
 
       if (playerItem) {
-        handlePlayerAction(action)
+        handlePlayerAction(action, event)
         return
       }
 
@@ -837,12 +1138,45 @@ function TvApp() {
       handleBrowseAction(action)
     }
 
-    window.addEventListener('keydown', handleKeyDown)
+    function handleKeyUp(event: KeyboardEvent) {
+      const action = getRemoteAction(event)
 
-    return () => window.removeEventListener('keydown', handleKeyDown)
+      if (
+        !playerItem ||
+        (action !== 'left' && action !== 'right')
+      ) {
+        return
+      }
+
+      event.preventDefault()
+      handlePlayerScanKeyUp(action === 'right' ? 1 : -1)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+    }
   })
 
   if (playerItem) {
+    const playerInfoClassName = [
+      'tv-player-info',
+      scanPreview ? 'scanning' : '',
+      playerHudVisible || scanPreview ? '' : 'hidden',
+    ]
+      .filter(Boolean)
+      .join(' ')
+    const scanProgressPercent = scanPreview
+      ? getProgressPercent(scanPreview.position, playerClock.duration)
+      : 0
+    const playbackProgressPercent = getProgressPercent(
+      playerClock.position,
+      playerClock.duration,
+    )
+
     return (
       <main className="tv-player-shell">
         <video
@@ -851,6 +1185,7 @@ function TvApp() {
           controls
           key={playerItem.id}
           onEnded={(event) => {
+            clearScanPreview()
             clearPlayerHudTimeout()
             updatePlayerClock(event.currentTarget)
             recordPlayback(playerItem, event.currentTarget, true)
@@ -889,16 +1224,52 @@ function TvApp() {
           ref={playerRef}
           src={resolveMediaUrl(playerItem.streamUrl, apiBase)}
         />
-        <div
-          className={
-            playerHudVisible ? 'tv-player-info' : 'tv-player-info hidden'
-          }
-        >
-          <div className="tv-player-title">
-            <strong>{getItemDisplayTitle(playerItem)}</strong>
-            <span>{formatEpisodeNumber(playerItem)}</span>
-          </div>
-          <span>{formatPlayerClock(playerClock)}</span>
+        <div className={playerInfoClassName}>
+          {scanPreview ? (
+            <>
+              <div className="tv-scan-thumbnail">
+                <video
+                  className="tv-scan-thumbnail-video"
+                  muted
+                  onLoadedMetadata={(event) => {
+                    event.currentTarget.currentTime = scanPreview.position
+                  }}
+                  playsInline
+                  preload="metadata"
+                  ref={previewVideoRef}
+                  src={resolveMediaUrl(playerItem.streamUrl, apiBase)}
+                />
+                <span>{formatDuration(scanPreview.position)}</span>
+              </div>
+              <div className="tv-scan-details">
+                <div className="tv-scan-heading">
+                  <strong>{formatScanPreviewMode(scanPreview)}</strong>
+                  <span>
+                    {formatDuration(scanPreview.position)} /{' '}
+                    {playerClock.duration > 0
+                      ? formatDuration(playerClock.duration)
+                      : '--:--'}
+                  </span>
+                </div>
+                <div className="tv-scan-rail" aria-hidden="true">
+                  <i style={{ width: `${playbackProgressPercent}%` }} />
+                  <b style={{ left: `${scanProgressPercent}%` }} />
+                </div>
+                <div className="tv-player-title">
+                  <strong>{getItemDisplayTitle(playerItem)}</strong>
+                  <span>{formatEpisodeNumber(playerItem)}</span>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="tv-player-title">
+                <strong>{getItemDisplayTitle(playerItem)}</strong>
+                <span>{formatEpisodeNumber(playerItem)}</span>
+              </div>
+              <span>{formatPlayerClock(playerClock)}</span>
+            </>
+          )}
         </div>
       </main>
     )
@@ -1668,6 +2039,37 @@ function formatPlayerClock(clock: PlayerClock) {
   return `${formatDuration(clock.position)} / ${
     clock.duration > 0 ? formatDuration(clock.duration) : '--:--'
   }`
+}
+
+function formatScanPreviewMode(preview: ScanPreview) {
+  const directionLabel = preview.direction > 0 ? 'FF' : 'REW'
+
+  return `${directionLabel} ${scanSpeedMultipliers[preview.speedIndex]}x`
+}
+
+function getNextScanSpeedIndex(
+  preview: ScanPreview,
+  direction: ScanDirection,
+) {
+  if (preview.direction !== direction) {
+    return 0
+  }
+
+  return (preview.speedIndex + 1) % scanSpeedMultipliers.length
+}
+
+function getProgressPercent(position: number, duration: number) {
+  if (duration <= 0) {
+    return 0
+  }
+
+  return clamp((position / duration) * 100, 0, 100)
+}
+
+function getFiniteVideoDuration(video: HTMLVideoElement) {
+  return Number.isFinite(video.duration) && video.duration > 0
+    ? video.duration
+    : 0
 }
 
 function sortByTitle(first: TvTitle, second: TvTitle) {

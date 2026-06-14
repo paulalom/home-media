@@ -654,6 +654,20 @@ button {
     transform 160ms ease;
 }
 
+.tv-player-info.scanning {
+  background: rgb(5 6 7 / 86%);
+  border-color: rgb(255 207 90 / 44%);
+  bottom: 42px;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 220px minmax(0, 1fr);
+  left: 50%;
+  max-width: calc(100vw - 64px);
+  padding: 12px;
+  transform: translateX(-50%);
+  width: min(760px, calc(100vw - 64px));
+}
+
 .tv-player-info.hidden {
   opacity: 0;
   pointer-events: none;
@@ -678,6 +692,90 @@ button {
   font-size: 0.98rem;
   min-width: 116px;
   text-align: right;
+}
+
+.tv-scan-thumbnail {
+  aspect-ratio: 16 / 9;
+  background: #000000;
+  border: 1px solid rgb(247 244 237 / 18%);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+  width: 220px;
+}
+
+.tv-scan-thumbnail-video {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.tv-scan-thumbnail span {
+  background: rgb(5 6 7 / 82%);
+  border-radius: 6px;
+  bottom: 8px;
+  color: var(--tv-text);
+  font-size: 0.9rem;
+  font-weight: 900;
+  padding: 4px 7px;
+  position: absolute;
+  right: 8px;
+}
+
+.tv-scan-details {
+  align-content: center;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.tv-scan-heading {
+  align-items: center;
+  display: flex;
+  gap: 14px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.tv-scan-heading strong {
+  color: var(--tv-gold);
+  font-size: 1.12rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.tv-scan-heading span {
+  color: var(--tv-text-soft);
+  flex-shrink: 0;
+  font-size: 0.98rem;
+  font-weight: 900;
+}
+
+.tv-scan-rail {
+  background: rgb(247 244 237 / 20%);
+  border-radius: 999px;
+  height: 8px;
+  position: relative;
+}
+
+.tv-scan-rail i {
+  background: var(--tv-teal);
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+}
+
+.tv-scan-rail b {
+  background: var(--tv-gold);
+  border: 3px solid #050607;
+  border-radius: 999px;
+  box-shadow: 0 0 0 2px rgb(255 207 90 / 46%);
+  height: 18px;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 18px;
 }
 
 @media (max-width: 1100px) {
@@ -708,5 +806,14 @@ button {
 
   .tv-card {
     flex-basis: 214px;
+  }
+
+  .tv-player-info.scanning {
+    grid-template-columns: 164px minmax(0, 1fr);
+    width: calc(100vw - 48px);
+  }
+
+  .tv-scan-thumbnail {
+    width: 164px;
   }
 }
