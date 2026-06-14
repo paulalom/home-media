@@ -252,7 +252,9 @@ const PREVIEW_CACHE_QUALITY: PreviewFrameQuality = 'low'
 const PREVIEW_CACHE_BACKGROUND_COOLDOWN_MS = 2_000
 const PREVIEW_CACHE_BACKGROUND_CPU_BUDGET = 0.25
 const PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS = 8
+const PREVIEW_CACHE_BACKGROUND_SHEET_CONCURRENCY = 4
 const PREVIEW_CACHE_FOREGROUND_CPU_BUDGET = 1
+const PREVIEW_CACHE_FOREGROUND_SHEET_CONCURRENCY = 4
 const PREVIEW_SPRITE_COLUMNS = 10
 const PREVIEW_SPRITE_ROWS = 6
 const PREVIEW_SPRITE_FRAMES_PER_SHEET =
@@ -910,12 +912,14 @@ function getPreviewCacheWarmSettings(mode = previewCacheWarmMode) {
     return {
       cpuBudget: PREVIEW_CACHE_FOREGROUND_CPU_BUDGET,
       ffmpegThreads: undefined,
+      sheetConcurrency: PREVIEW_CACHE_FOREGROUND_SHEET_CONCURRENCY,
     }
   }
 
   return {
     cpuBudget: PREVIEW_CACHE_BACKGROUND_CPU_BUDGET,
     ffmpegThreads: PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS,
+    sheetConcurrency: PREVIEW_CACHE_BACKGROUND_SHEET_CONCURRENCY,
   }
 }
 
@@ -945,53 +949,61 @@ async function warmMissingPreviewSheets(
     )
   }
 
-  for (const sheetIndex of [...missingSheetIndexes].sort(
-    (first, second) => first - second,
-  )) {
+  const jobs = [...missingSheetIndexes]
+    .sort((first, second) => first - second)
+    .map((sheetIndex) => {
+      const frameCount = missingFrameCountBySheet.get(sheetIndex) ?? 0
+      const sheetInfo = getPreviewSpriteSheetInfoForIndex(
+        mediaId,
+        mediaPath,
+        stats,
+        sheetIndex,
+        PREVIEW_CACHE_QUALITY,
+      )
+
+      return {
+        frameCount,
+        sheetInfo,
+      }
+    })
+    .filter((job) => job.frameCount > 0)
+
+  await runWithConcurrency(jobs, settings.sheetConcurrency, async (job) => {
     if (runId !== previewCacheWarmRunId) {
       return
     }
 
-    const frameCount = missingFrameCountBySheet.get(sheetIndex) ?? 0
-
-    if (frameCount <= 0) {
-      continue
-    }
-
-    const sheetInfo = getPreviewSpriteSheetInfoForIndex(
-      mediaId,
-      mediaPath,
-      stats,
-      sheetIndex,
-      PREVIEW_CACHE_QUALITY,
-    )
-
-    if (await isFile(sheetInfo.sheetPath)) {
-      markPreviewCacheFramesCached(frameCount)
-      continue
+    if (await isFile(job.sheetInfo.sheetPath)) {
+      markPreviewCacheFramesCached(job.frameCount)
+      return
     }
 
     try {
       await trackActivePreviewFrameWarm(
-        generatePreviewSpriteSheet(mediaPath, sheetInfo, PREVIEW_CACHE_QUALITY, {
-          threads: settings.ffmpegThreads,
-        }).then(() => undefined),
+        generatePreviewSpriteSheet(
+          mediaPath,
+          job.sheetInfo,
+          PREVIEW_CACHE_QUALITY,
+          {
+            threads: settings.ffmpegThreads,
+          },
+        ).then(() => undefined),
       )
 
       if (runId !== previewCacheWarmRunId) {
         return
       }
 
-      markPreviewCacheFramesGenerated(frameCount)
+      markPreviewCacheFramesGenerated(job.frameCount)
       await throttlePreviewCacheWarm(runId)
     } catch (error) {
       if (runId !== previewCacheWarmRunId) {
         return
       }
 
-      markPreviewCacheFramesFailed(frameCount, getErrorMessage(error))
+      markPreviewCacheFramesFailed(job.frameCount, getErrorMessage(error))
     }
-  }
+  })
 }
 
 async function trackActivePreviewFrameWarm<T>(promise: Promise<T>) {
@@ -1065,6 +1077,25 @@ function getPreviewCacheFrameTimes(duration: number) {
   }
 
   return [...new Set(frameTimes)]
+}
+
+function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+) {
+  let nextIndex = 0
+  const workerCount = Math.min(Math.max(concurrency, 1), items.length)
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex]
+
+      nextIndex += 1
+      await worker(item)
+    }
+  })
+
+  return Promise.all(workers)
 }
 
 function sleep(delayMs: number) {
