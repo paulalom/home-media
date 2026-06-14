@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, promises as fs } from 'node:fs'
 import type { Stats } from 'node:fs'
@@ -101,6 +102,8 @@ type ResolvedArtwork = {
   filePath: string
 }
 
+type PreviewFrameQuality = keyof typeof PREVIEW_FRAME_SETTINGS
+
 type TmdbCredentials =
   | {
       apiKey: string
@@ -126,6 +129,7 @@ type TmdbSearchResponse = {
 
 const DEFAULT_MEDIA_ROOT = 'F:/media'
 const ARTWORK_CACHE_DIRECTORY_NAME = 'Home Media'
+const PREVIEW_FRAME_CACHE_DIRECTORY_NAME = 'preview-frames'
 const VIDEO_EXTENSIONS = new Set([
   '.avi',
   '.divx',
@@ -152,6 +156,20 @@ const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500'
 const ARTWORK_FETCH_TIMEOUT_MS = 10_000
 const ARTWORK_MISSING_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ARTWORK_BYTES = 8 * 1024 * 1024
+const PREVIEW_FRAME_TIMEOUT_MS = 8_000
+const MAX_PREVIEW_FRAME_BYTES = 3 * 1024 * 1024
+const PREVIEW_FRAME_SETTINGS = {
+  high: {
+    jpegQuality: 4,
+    timeBucketSeconds: 1,
+    width: 960,
+  },
+  low: {
+    jpegQuality: 8,
+    timeBucketSeconds: 8,
+    width: 320,
+  },
+} as const
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -184,6 +202,7 @@ const API_CORS_HEADERS = {
 }
 let libraryCache: LibraryCache | null = null
 const artworkFetches = new Map<string, Promise<ResolvedArtwork | null>>()
+const previewFrameFetches = new Map<string, Promise<string>>()
 
 export function getMediaRoot() {
   return process.env.HOME_MEDIA_ROOT ?? DEFAULT_MEDIA_ROOT
@@ -201,6 +220,24 @@ export function getArtworkCacheRoot() {
   return localAppData
     ? resolve(localAppData, ARTWORK_CACHE_DIRECTORY_NAME, 'artwork')
     : resolve(homedir(), '.home-media', 'artwork')
+}
+
+export function getPreviewFrameCacheRoot() {
+  const configuredRoot = process.env.HOME_MEDIA_PREVIEW_CACHE_ROOT?.trim()
+
+  if (configuredRoot) {
+    return resolve(configuredRoot)
+  }
+
+  const localAppData = process.env.LOCALAPPDATA?.trim()
+
+  return localAppData
+    ? resolve(
+        localAppData,
+        ARTWORK_CACHE_DIRECTORY_NAME,
+        PREVIEW_FRAME_CACHE_DIRECTORY_NAME,
+      )
+    : resolve(homedir(), '.home-media', PREVIEW_FRAME_CACHE_DIRECTORY_NAME)
 }
 
 export async function scanMediaLibrary(
@@ -254,7 +291,9 @@ export async function handleMediaApi(
   const url = new URL(req.url ?? '/', 'http://home-media.local')
   const isApiPath =
     url.pathname === '/api/library' ||
-    /^\/api\/media\/[^/]+\/(?:artwork|stream)$/.test(url.pathname)
+    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|stream)$/.test(
+      url.pathname,
+    )
 
   if (isApiPath && req.method === 'OPTIONS') {
     res.writeHead(204, API_CORS_HEADERS)
@@ -313,6 +352,25 @@ export async function handleMediaApi(
         res,
         url.searchParams.get('refresh') === '1',
       )
+    } catch (error) {
+      sendError(res, 500, getErrorMessage(error))
+    }
+
+    return true
+  }
+
+  const previewFrameMatch = /^\/api\/media\/([^/]+)\/preview-frame$/.exec(
+    url.pathname,
+  )
+
+  if (previewFrameMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      sendMethodNotAllowed(res, ['GET', 'HEAD'])
+      return true
+    }
+
+    try {
+      await streamPreviewFrame(previewFrameMatch[1], req, res, url.searchParams)
     } catch (error) {
       sendError(res, 500, getErrorMessage(error))
     }
@@ -465,6 +523,268 @@ async function streamArtwork(
   }
 
   createReadStream(artwork.filePath).pipe(res)
+}
+
+async function streamPreviewFrame(
+  mediaId: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  searchParams: URLSearchParams,
+) {
+  const mediaPath = getMediaPath(mediaId)
+
+  if (!mediaPath) {
+    sendError(res, 404, 'Media not found')
+    return
+  }
+
+  const extension = extname(mediaPath).toLowerCase()
+
+  if (!VIDEO_EXTENSIONS.has(extension)) {
+    sendError(res, 415, 'Unsupported media type')
+    return
+  }
+
+  let stats: Stats
+
+  try {
+    stats = await fs.stat(mediaPath)
+  } catch {
+    sendError(res, 404, 'Media not found')
+    return
+  }
+
+  if (!stats.isFile()) {
+    sendError(res, 404, 'Media not found')
+    return
+  }
+
+  const quality = getPreviewFrameQuality(searchParams.get('quality'))
+  const frameTime = getPreviewFrameTime(searchParams.get('t'), quality)
+  const framePath = await resolvePreviewFrame(
+    mediaId,
+    mediaPath,
+    stats,
+    frameTime,
+    quality,
+  )
+  const frameStats = await fs.stat(framePath)
+
+  res.writeHead(200, {
+    ...API_CORS_HEADERS,
+    'Cache-Control': 'public, max-age=86400',
+    'Content-Length': frameStats.size,
+    'Content-Type': 'image/jpeg',
+    'Last-Modified': frameStats.mtime.toUTCString(),
+  })
+
+  if (req.method === 'HEAD') {
+    res.end()
+    return
+  }
+
+  createReadStream(framePath).pipe(res)
+}
+
+async function resolvePreviewFrame(
+  mediaId: string,
+  mediaPath: string,
+  stats: Stats,
+  frameTime: number,
+  quality: PreviewFrameQuality,
+) {
+  const cacheRoot = getPreviewFrameCacheRoot()
+  const cacheKey = createPreviewFrameCacheKey(
+    mediaId,
+    stats,
+    frameTime,
+    quality,
+  )
+  const framePath = join(cacheRoot, `${cacheKey}.jpg`)
+
+  if (await isFile(framePath)) {
+    return framePath
+  }
+
+  const existingFetch = previewFrameFetches.get(framePath)
+
+  if (existingFetch) {
+    return existingFetch
+  }
+
+  const fetchPromise = generatePreviewFrame(
+    mediaPath,
+    framePath,
+    frameTime,
+    quality,
+  )
+
+  previewFrameFetches.set(framePath, fetchPromise)
+
+  try {
+    return await fetchPromise
+  } finally {
+    if (previewFrameFetches.get(framePath) === fetchPromise) {
+      previewFrameFetches.delete(framePath)
+    }
+  }
+}
+
+async function generatePreviewFrame(
+  mediaPath: string,
+  framePath: string,
+  frameTime: number,
+  quality: PreviewFrameQuality,
+) {
+  const settings = PREVIEW_FRAME_SETTINGS[quality]
+  const tempPath = `${framePath}.${Date.now()}.tmp`
+  const imageBytes = await extractPreviewFrame(mediaPath, frameTime, settings)
+
+  await fs.mkdir(dirname(framePath), { recursive: true })
+  await fs.writeFile(tempPath, imageBytes)
+  await fs.rename(tempPath, framePath)
+
+  return framePath
+}
+
+function extractPreviewFrame(
+  mediaPath: string,
+  frameTime: number,
+  settings: (typeof PREVIEW_FRAME_SETTINGS)[PreviewFrameQuality],
+) {
+  return new Promise<Buffer>((resolvePromise, rejectPromise) => {
+    const ffmpeg = spawn(
+      getFfmpegExecutable(),
+      [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-ss',
+        formatFfmpegTime(frameTime),
+        '-i',
+        mediaPath,
+        '-frames:v',
+        '1',
+        '-vf',
+        `scale=${settings.width}:-2`,
+        '-q:v',
+        String(settings.jpegQuality),
+        '-f',
+        'image2pipe',
+        'pipe:1',
+      ],
+      {
+        windowsHide: true,
+      },
+    )
+    const chunks: Buffer[] = []
+    const errorChunks: Buffer[] = []
+    let byteLength = 0
+    let settled = false
+    const timeout = setTimeout(() => {
+      finish(new Error('Preview frame generation timed out'))
+      ffmpeg.kill()
+    }, PREVIEW_FRAME_TIMEOUT_MS)
+
+    function finish(error: Error | null, imageBytes?: Buffer) {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      clearTimeout(timeout)
+
+      if (error) {
+        rejectPromise(error)
+        return
+      }
+
+      resolvePromise(imageBytes ?? Buffer.alloc(0))
+    }
+
+    ffmpeg.stdout.on('data', (chunk: Buffer) => {
+      byteLength += chunk.byteLength
+
+      if (byteLength > MAX_PREVIEW_FRAME_BYTES) {
+        finish(new Error('Preview frame is too large'))
+        ffmpeg.kill()
+        return
+      }
+
+      chunks.push(chunk)
+    })
+
+    ffmpeg.stderr.on('data', (chunk: Buffer) => {
+      errorChunks.push(chunk)
+    })
+
+    ffmpeg.on('error', (error) => {
+      finish(error)
+    })
+
+    ffmpeg.on('close', (code) => {
+      if (settled) {
+        return
+      }
+
+      const imageBytes = Buffer.concat(chunks, byteLength)
+
+      if (code === 0 && imageBytes.length > 0) {
+        finish(null, imageBytes)
+        return
+      }
+
+      const stderr = Buffer.concat(errorChunks).toString('utf8').trim()
+      const message = stderr
+        ? `Preview frame generation failed: ${stderr}`
+        : `Preview frame generation failed (${code ?? 'unknown exit'})`
+
+      finish(new Error(message))
+    })
+  })
+}
+
+function getPreviewFrameQuality(value: string | null): PreviewFrameQuality {
+  return value === 'high' ? 'high' : 'low'
+}
+
+function getPreviewFrameTime(
+  value: string | null,
+  quality: PreviewFrameQuality,
+) {
+  const numericValue = Number(value)
+  const requestedTime =
+    Number.isFinite(numericValue) && numericValue > 0 ? numericValue : 0
+  const bucketSeconds = PREVIEW_FRAME_SETTINGS[quality].timeBucketSeconds
+
+  return Math.max(Math.round(requestedTime / bucketSeconds) * bucketSeconds, 0)
+}
+
+function createPreviewFrameCacheKey(
+  mediaId: string,
+  stats: Stats,
+  frameTime: number,
+  quality: PreviewFrameQuality,
+) {
+  return createHash('sha256')
+    .update(
+      [
+        mediaId,
+        String(stats.size),
+        String(Math.floor(stats.mtimeMs)),
+        quality,
+        formatFfmpegTime(frameTime),
+      ].join('\n'),
+    )
+    .digest('hex')
+}
+
+function getFfmpegExecutable() {
+  return process.env.HOME_MEDIA_FFMPEG_PATH?.trim() || 'ffmpeg'
+}
+
+function formatFfmpegTime(seconds: number) {
+  return seconds.toFixed(3)
 }
 
 function getArtworkUrl(mediaId: string, category: MediaCategory) {

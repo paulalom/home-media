@@ -145,6 +145,8 @@ const maxRowItems = 28
 const playerHudHideDelayMs = 1000
 const playerSeekStepSeconds = 5
 const scanHoldDelayMs = 320
+const scanPreviewHighFrameBucketSeconds = 1
+const scanPreviewLowFrameBucketSeconds = 8
 const scanPreviewBaseSecondsPerSecond = 5
 const scanPreviewTickMs = 120
 const scanSpeedMultipliers = [2, 3, 4] as const
@@ -197,7 +199,6 @@ function TvApp() {
   const playerScanLastTickRef = useRef<number | null>(null)
   const playerScanPreviewRef = useRef<ScanPreview | null>(null)
   const playerRef = useRef<HTMLVideoElement | null>(null)
-  const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
   const selectedCardRef = useRef<HTMLButtonElement | null>(null)
   const selectedRowRef = useRef<HTMLElement | null>(null)
@@ -235,33 +236,6 @@ function TvApp() {
   useEffect(() => {
     playerScanPreviewRef.current = scanPreview
   }, [scanPreview])
-
-  useEffect(() => {
-    if (!scanPreview) {
-      return
-    }
-
-    const previewVideo = previewVideoRef.current
-
-    if (!previewVideo || previewVideo.readyState < 1) {
-      return
-    }
-
-    const previewDuration = getFiniteVideoDuration(previewVideo)
-    const nextPosition = previewDuration
-      ? clamp(scanPreview.position, 0, previewDuration)
-      : scanPreview.position
-
-    if (Math.abs(previewVideo.currentTime - nextPosition) < 0.25) {
-      return
-    }
-
-    try {
-      previewVideo.currentTime = nextPosition
-    } catch {
-      // Some TV runtimes reject rapid preview seeks until metadata is ready.
-    }
-  }, [playerItem?.id, scanPreview])
 
   useEffect(() => {
     registerSamsungRemoteKeys()
@@ -1176,6 +1150,9 @@ function TvApp() {
       playerClock.position,
       playerClock.duration,
     )
+    const scanPreviewFrameUrl = scanPreview
+      ? getScanPreviewFrameUrl(playerItem, scanPreview, apiBase)
+      : ''
 
     return (
       <main className="tv-player-shell">
@@ -1228,16 +1205,15 @@ function TvApp() {
           {scanPreview ? (
             <>
               <div className="tv-scan-thumbnail">
-                <video
-                  className="tv-scan-thumbnail-video"
-                  muted
-                  onLoadedMetadata={(event) => {
-                    event.currentTarget.currentTime = scanPreview.position
-                  }}
-                  playsInline
-                  preload="metadata"
-                  ref={previewVideoRef}
-                  src={resolveMediaUrl(playerItem.streamUrl, apiBase)}
+                <img
+                  alt=""
+                  className="tv-scan-thumbnail-image"
+                  decoding="async"
+                  draggable={false}
+                  loading="eager"
+                  onError={hideFailedArtwork}
+                  onLoad={showLoadedImage}
+                  src={scanPreviewFrameUrl}
                 />
                 <span>{formatDuration(scanPreview.position)}</span>
               </div>
@@ -1799,6 +1775,10 @@ function hideFailedArtwork(event: SyntheticEvent<HTMLImageElement>) {
   event.currentTarget.hidden = true
 }
 
+function showLoadedImage(event: SyntheticEvent<HTMLImageElement>) {
+  event.currentTarget.hidden = false
+}
+
 function readInitialApiBase() {
   try {
     const params = new URLSearchParams(window.location.search)
@@ -1849,6 +1829,28 @@ function resolveMediaUrl(streamUrl: string, apiBase: string) {
   }
 
   return buildApiUrl(streamUrl, apiBase)
+}
+
+function getScanPreviewFrameUrl(
+  item: MediaItem,
+  preview: ScanPreview,
+  apiBase: string,
+) {
+  const quality = preview.scanning ? 'low' : 'high'
+  const bucketSeconds = preview.scanning
+    ? scanPreviewLowFrameBucketSeconds
+    : scanPreviewHighFrameBucketSeconds
+  const framePosition =
+    Math.round(preview.position / bucketSeconds) * bucketSeconds
+  const params = new URLSearchParams({
+    quality,
+    t: String(Math.max(framePosition, 0)),
+  })
+
+  return resolveMediaUrl(
+    `/api/media/${encodeURIComponent(item.id)}/preview-frame?${params}`,
+    apiBase,
+  )
 }
 
 function getPrimaryActionLabel(

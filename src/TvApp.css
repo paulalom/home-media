@@ -660,12 +660,12 @@ button {
   bottom: 42px;
   display: grid;
   gap: 14px;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: minmax(420px, 660px) minmax(0, 1fr);
   left: 50%;
   max-width: calc(100vw - 64px);
   padding: 12px;
   transform: translateX(-50%);
-  width: min(760px, calc(100vw - 64px));
+  width: min(1180px, calc(100vw - 64px));
 }
 
 .tv-player-info.hidden {
@@ -701,10 +701,10 @@ button {
   border-radius: 8px;
   overflow: hidden;
   position: relative;
-  width: 220px;
+  width: min(660px, 56vw);
 }
 
-.tv-scan-thumbnail-video {
+.tv-scan-thumbnail-image {
   display: block;
   height: 100%;
   object-fit: cover;
@@ -809,11 +809,22 @@ button {
   }
 
   .tv-player-info.scanning {
-    grid-template-columns: 164px minmax(0, 1fr);
+    grid-template-columns: minmax(340px, 52vw) minmax(0, 1fr);
     width: calc(100vw - 48px);
   }
 
   .tv-scan-thumbnail {
-    width: 164px;
+    width: 52vw;
+  }
+}
+
+@media (max-width: 760px) {
+  .tv-player-info.scanning {
+    grid-template-columns: 1fr;
+    width: calc(100vw - 32px);
+  }
+
+  .tv-scan-thumbnail {
+    width: 100%;
   }
 }
