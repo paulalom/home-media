@@ -174,7 +174,7 @@ const PREVIEW_FRAME_SETTINGS = {
   low: {
     fastSeek: true,
     jpegQuality: 12,
-    timeBucketSeconds: 30,
+    timeBucketSeconds: 5,
     width: 240,
   },
 } as const

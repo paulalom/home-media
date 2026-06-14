@@ -146,7 +146,9 @@ const playerHudHideDelayMs = 1000
 const playerSeekStepSeconds = 5
 const scanHoldDelayMs = 320
 const scanPreviewHighFrameBucketSeconds = 1
-const scanPreviewLowFrameBucketSeconds = 30
+const scanPreviewSlowFrameBucketSeconds = 5
+const scanPreviewMediumFrameBucketSeconds = 10
+const scanPreviewFastFrameBucketSeconds = 30
 const scanPreviewBaseSecondsPerSecond = 5
 const scanPreviewTickMs = 120
 const scanSpeedMultipliers = [2, 3, 4, 5, 6, 7, 8, 9, 10] as const
@@ -193,6 +195,7 @@ function TvApp() {
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
   const playerHudTimeoutRef = useRef<number | null>(null)
+  const playerScanCommitCleanupRef = useRef<(() => void) | null>(null)
   const playerScanHeldDirectionRef = useRef<ScanDirection | null>(null)
   const playerScanHoldTimeoutRef = useRef<number | null>(null)
   const playerScanIntervalRef = useRef<number | null>(null)
@@ -254,6 +257,11 @@ function TvApp() {
         window.clearInterval(playerScanIntervalRef.current)
       }
 
+      if (playerScanCommitCleanupRef.current) {
+        playerScanCommitCleanupRef.current()
+      }
+
+      playerScanCommitCleanupRef.current = null
       playerScanHeldDirectionRef.current = null
       playerScanHoldTimeoutRef.current = null
       playerScanIntervalRef.current = null
@@ -943,14 +951,23 @@ function TvApp() {
 
     player.currentTime = nextPosition
     updatePlayerClockFromValues(duration, nextPosition)
+
+    if (!shouldResumePlayback) {
+      stopScanPreviewTicker()
+      setScanPreviewState({
+        ...preview,
+        position: nextPosition,
+        scanning: false,
+      })
+      finishScanPreviewCommitAfterSeek(player)
+      showPlayerHud()
+      return true
+    }
+
     clearScanPreview()
 
-    if (shouldResumePlayback) {
-      void player.play()
-      showPlayerHud(true)
-    } else {
-      showPlayerHud()
-    }
+    void player.play()
+    showPlayerHud(true)
 
     return true
   }
@@ -1005,6 +1022,7 @@ function TvApp() {
 
   function clearScanPreview(resetState = true) {
     clearScanHoldTimeout()
+    clearScanCommitWait()
     stopScanPreviewTicker()
     playerScanHeldDirectionRef.current = null
     playerScanWasPlayingRef.current = false
@@ -1023,6 +1041,38 @@ function TvApp() {
 
     window.clearTimeout(playerScanHoldTimeoutRef.current)
     playerScanHoldTimeoutRef.current = null
+  }
+
+  function clearScanCommitWait() {
+    if (!playerScanCommitCleanupRef.current) {
+      return
+    }
+
+    playerScanCommitCleanupRef.current()
+    playerScanCommitCleanupRef.current = null
+  }
+
+  function finishScanPreviewCommitAfterSeek(player: HTMLVideoElement) {
+    clearScanCommitWait()
+
+    let isDone = false
+    const finishCommit = () => {
+      if (isDone) {
+        return
+      }
+
+      isDone = true
+      clearScanCommitWait()
+      clearScanPreview()
+      showPlayerHud()
+    }
+    const timeoutId = window.setTimeout(finishCommit, 1200)
+
+    player.addEventListener('seeked', finishCommit)
+    playerScanCommitCleanupRef.current = () => {
+      window.clearTimeout(timeoutId)
+      player.removeEventListener('seeked', finishCommit)
+    }
   }
 
   function startScanPreviewTicker() {
@@ -1934,9 +1984,7 @@ function getScanPreviewFrameUrl(
   apiBase: string,
 ) {
   const quality = preview.scanning ? 'low' : 'high'
-  const bucketSeconds = preview.scanning
-    ? scanPreviewLowFrameBucketSeconds
-    : scanPreviewHighFrameBucketSeconds
+  const bucketSeconds = getScanPreviewFrameBucketSeconds(preview)
   const framePosition =
     Math.round(preview.position / bucketSeconds) * bucketSeconds
   const params = new URLSearchParams({
@@ -1948,6 +1996,24 @@ function getScanPreviewFrameUrl(
     `/api/media/${encodeURIComponent(item.id)}/preview-frame?${params}`,
     apiBase,
   )
+}
+
+function getScanPreviewFrameBucketSeconds(preview: ScanPreview) {
+  if (!preview.scanning) {
+    return scanPreviewHighFrameBucketSeconds
+  }
+
+  const multiplier = scanSpeedMultipliers[preview.speedIndex]
+
+  if (multiplier >= 10) {
+    return scanPreviewFastFrameBucketSeconds
+  }
+
+  if (multiplier >= 5) {
+    return scanPreviewMediumFrameBucketSeconds
+  }
+
+  return scanPreviewSlowFrameBucketSeconds
 }
 
 function getPrimaryActionLabel(
