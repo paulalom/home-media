@@ -640,7 +640,7 @@ button {
 }
 
 .tv-player-blackout {
-  background: #000000;
+  background: rgb(0 0 0 / 90%);
   inset: 0;
   pointer-events: none;
   position: absolute;
