@@ -647,6 +647,77 @@ button {
   z-index: 4;
 }
 
+.tv-player-episode-switch {
+  align-items: stretch;
+  bottom: 42px;
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+  left: 50%;
+  max-width: calc(100vw - 64px);
+  position: absolute;
+  transform: translateX(-50%);
+  width: min(820px, calc(100vw - 64px));
+  z-index: 6;
+}
+
+.tv-player-episode-button {
+  align-items: center;
+  background: rgb(25 28 32 / 94%);
+  border: 2px solid rgb(247 244 237 / 24%);
+  border-radius: 8px;
+  color: var(--tv-text);
+  display: grid;
+  flex: 1 1 0;
+  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 76px;
+  min-width: 0;
+  padding: 10px 14px;
+  text-align: left;
+}
+
+.tv-player-episode-button span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tv-player-episode-button strong,
+.tv-player-episode-button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tv-player-episode-button strong {
+  color: inherit;
+  font-size: 1rem;
+  font-weight: 900;
+}
+
+.tv-player-episode-button small {
+  color: var(--tv-muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.tv-player-episode-button.selected {
+  background: #fffdf6;
+  border-color: var(--tv-gold);
+  color: #15181b;
+}
+
+.tv-player-episode-button.selected small {
+  color: #59656b;
+}
+
+.tv-player-episode-button:disabled {
+  color: #778185;
+  opacity: 0.6;
+}
+
 .tv-player-info {
   background: rgb(5 6 7 / 76%);
   border: 1px solid rgb(247 244 237 / 16%);
@@ -829,6 +900,16 @@ button {
 }
 
 @media (max-width: 760px) {
+  .tv-player-episode-switch {
+    bottom: 24px;
+    flex-direction: column;
+    width: calc(100vw - 32px);
+  }
+
+  .tv-player-episode-button {
+    min-height: 64px;
+  }
+
   .tv-player-info.scanning {
     grid-template-columns: 1fr;
     width: calc(100vw - 32px);

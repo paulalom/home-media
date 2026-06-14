@@ -5,7 +5,7 @@ import {
   useState,
   type SyntheticEvent,
 } from 'react'
-import { Settings } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, Settings } from 'lucide-react'
 import {
   deletePlaybackRecord,
   fetchPlaybackHistory,
@@ -105,6 +105,12 @@ type ScanPreview = {
   speedIndex: number
 }
 
+type PlayerEpisodeSwitchOptions = {
+  next: MediaItem | null
+  previous: MediaItem | null
+  target: MediaItem | null
+}
+
 type ActionMenuState =
   | {
       kind: 'episode'
@@ -189,6 +195,8 @@ function TvApp() {
     position: 0,
   })
   const [playerBlackoutVisible, setPlayerBlackoutVisible] = useState(false)
+  const [playerEpisodeSwitchTargetId, setPlayerEpisodeSwitchTargetId] =
+    useState<string | null>(null)
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null)
@@ -464,6 +472,18 @@ function TvApp() {
     0,
     Math.max(actionMenuEntries.length - 1, 0),
   )
+  const playerEpisodeSwitchOptions = useMemo(
+    () =>
+      getPlayerEpisodeSwitchOptions(
+        library?.items ?? [],
+        playerItem,
+        playerEpisodeSwitchTargetId,
+      ),
+    [library?.items, playerEpisodeSwitchTargetId, playerItem],
+  )
+  const hasPlayerEpisodeSwitchOptions = Boolean(
+    playerEpisodeSwitchOptions.previous || playerEpisodeSwitchOptions.next,
+  )
 
   useEffect(() => {
     const selectedCard = selectedCardRef.current
@@ -630,13 +650,40 @@ function TvApp() {
       const player = playerRef.current
 
       if (player?.paused && !playerScanPreviewRef.current) {
-        setPlayerBlackoutVisible(true)
+        showPlayerBlackout()
       }
 
       return
     }
 
-    setPlayerBlackoutVisible(false)
+    if (playerBlackoutVisible && !playerScanPreviewRef.current) {
+      if (action === 'back') {
+        hidePlayerBlackout()
+        return
+      }
+
+      if (action === 'up') {
+        hidePlayerBlackout()
+        revealPlayerHud()
+        return
+      }
+
+      if (
+        hasPlayerEpisodeSwitchOptions &&
+        (action === 'right' || action === 'left')
+      ) {
+        selectPlayerEpisodeSwitchTarget(action === 'right' ? 1 : -1)
+        return
+      }
+
+      if (hasPlayerEpisodeSwitchOptions && action === 'enter') {
+        if (commitPlayerEpisodeSwitchTarget()) {
+          return
+        }
+      }
+    }
+
+    hidePlayerBlackout()
 
     if (action === 'back') {
       if (playerScanPreviewRef.current) {
@@ -900,6 +947,17 @@ function TvApp() {
     }
   }
 
+  function showPlayerBlackout() {
+    setPlayerBlackoutVisible(true)
+    setPlayerEpisodeSwitchTargetId(null)
+    showPlayerHud()
+  }
+
+  function hidePlayerBlackout() {
+    setPlayerBlackoutVisible(false)
+    setPlayerEpisodeSwitchTargetId(null)
+  }
+
   function startPlayback(item: MediaItem | null) {
     if (!item?.browserPlayable) {
       return
@@ -912,7 +970,7 @@ function TvApp() {
       duration: 0,
       position: 0,
     })
-    setPlayerBlackoutVisible(false)
+    hidePlayerBlackout()
     setPlayerHudVisible(true)
     setPlayerItem(item)
   }
@@ -926,7 +984,7 @@ function TvApp() {
     clearScanPreview()
     clearScanPreviewImages()
     clearPlayerHudTimeout()
-    setPlayerBlackoutVisible(false)
+    hidePlayerBlackout()
     setPlayerItem(null)
   }
 
@@ -968,6 +1026,36 @@ function TvApp() {
       showPlayerHud()
       player.pause()
     }
+  }
+
+  function selectPlayerEpisodeSwitchTarget(direction: ScanDirection) {
+    const target =
+      direction > 0
+        ? playerEpisodeSwitchOptions.next
+        : playerEpisodeSwitchOptions.previous
+
+    if (!target) {
+      return
+    }
+
+    setPlayerEpisodeSwitchTargetId(target.id)
+    showPlayerHud()
+  }
+
+  function commitPlayerEpisodeSwitchTarget() {
+    const target = playerEpisodeSwitchOptions.target
+
+    if (!target) {
+      return false
+    }
+
+    if (playerItem && playerRef.current) {
+      recordPlayback(playerItem, playerRef.current, true)
+      playerRef.current.pause()
+    }
+
+    startPlayback(target)
+    return true
   }
 
   function handlePlayerScanKeyDown(
@@ -1485,7 +1573,7 @@ function TvApp() {
           onEnded={(event) => {
             clearScanPreview()
             clearPlayerHudTimeout()
-            setPlayerBlackoutVisible(false)
+            hidePlayerBlackout()
             updatePlayerClock(event.currentTarget)
             recordPlayback(playerItem, event.currentTarget, true)
             setPlayerItem(null)
@@ -1497,12 +1585,12 @@ function TvApp() {
             recordPlayback(playerItem, event.currentTarget, true)
           }}
           onPlay={(event) => {
-            setPlayerBlackoutVisible(false)
+            hidePlayerBlackout()
             updatePlayerClock(event.currentTarget)
             showPlayerHud(true)
           }}
           onPlaying={(event) => {
-            setPlayerBlackoutVisible(false)
+            hidePlayerBlackout()
             updatePlayerClock(event.currentTarget)
             showPlayerHud(true)
           }}
@@ -1527,6 +1615,83 @@ function TvApp() {
         />
         {playerBlackoutVisible ? (
           <div className="tv-player-blackout" aria-hidden="true" />
+        ) : null}
+        {playerBlackoutVisible && hasPlayerEpisodeSwitchOptions ? (
+          <div
+            aria-label="Episode selection"
+            className="tv-player-episode-switch"
+          >
+            <button
+              aria-label={
+                playerEpisodeSwitchOptions.previous
+                  ? `Select previous episode ${formatEpisodeNumber(
+                      playerEpisodeSwitchOptions.previous,
+                    )}`
+                  : 'No previous episode'
+              }
+              className={getPlayerEpisodeSwitchButtonClassName(
+                playerEpisodeSwitchOptions.target?.id ===
+                  playerEpisodeSwitchOptions.previous?.id,
+              )}
+              disabled={!playerEpisodeSwitchOptions.previous}
+              onClick={() => selectPlayerEpisodeSwitchTarget(-1)}
+              title="Previous episode"
+              type="button"
+            >
+              <ChevronLeft aria-hidden="true" size={28} />
+              <span>
+                <strong>
+                  {playerEpisodeSwitchOptions.previous
+                    ? formatEpisodeNumber(playerEpisodeSwitchOptions.previous)
+                    : 'Previous'}
+                </strong>
+                <small>
+                  {playerEpisodeSwitchOptions.previous
+                    ? getDetailItemTitle(playerEpisodeSwitchOptions.previous)
+                    : 'No episode'}
+                </small>
+              </span>
+              {playerEpisodeSwitchOptions.target?.id ===
+              playerEpisodeSwitchOptions.previous?.id ? (
+                <Check aria-hidden="true" size={22} />
+              ) : null}
+            </button>
+            <button
+              aria-label={
+                playerEpisodeSwitchOptions.next
+                  ? `Select next episode ${formatEpisodeNumber(
+                      playerEpisodeSwitchOptions.next,
+                    )}`
+                  : 'No next episode'
+              }
+              className={getPlayerEpisodeSwitchButtonClassName(
+                playerEpisodeSwitchOptions.target?.id ===
+                  playerEpisodeSwitchOptions.next?.id,
+              )}
+              disabled={!playerEpisodeSwitchOptions.next}
+              onClick={() => selectPlayerEpisodeSwitchTarget(1)}
+              title="Next episode"
+              type="button"
+            >
+              <span>
+                <strong>
+                  {playerEpisodeSwitchOptions.next
+                    ? formatEpisodeNumber(playerEpisodeSwitchOptions.next)
+                    : 'Next'}
+                </strong>
+                <small>
+                  {playerEpisodeSwitchOptions.next
+                    ? getDetailItemTitle(playerEpisodeSwitchOptions.next)
+                    : 'No episode'}
+                </small>
+              </span>
+              {playerEpisodeSwitchOptions.target?.id ===
+              playerEpisodeSwitchOptions.next?.id ? (
+                <Check aria-hidden="true" size={22} />
+              ) : null}
+              <ChevronRight aria-hidden="true" size={28} />
+            </button>
+          </div>
         ) : null}
         <div className={playerInfoClassName}>
           {scanPreview ? (
@@ -1928,8 +2093,7 @@ function buildTvTitles(items: MediaItem[], history: PlaybackHistory) {
       continue
     }
 
-    const showTitle = item.showTitle ?? item.title
-    const key = `${item.source}:${showTitle.toLowerCase()}`
+    const key = getShowGroupKey(item)
     const episodes = showMap.get(key) ?? []
 
     episodes.push(item)
@@ -1992,6 +2156,60 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
     episodes.slice(watchedIndex + 1).find((episode) => episode.browserPlayable) ??
     watchedEpisode
   )
+}
+
+function getPlayerEpisodeSwitchOptions(
+  items: MediaItem[],
+  currentItem: MediaItem | null,
+  targetId: string | null,
+): PlayerEpisodeSwitchOptions {
+  if (!currentItem || currentItem.category !== 'show') {
+    return createEmptyPlayerEpisodeSwitchOptions()
+  }
+
+  const currentShowKey = getShowGroupKey(currentItem)
+  const episodes = items
+    .filter(
+      (item) =>
+        item.category === 'show' &&
+        item.browserPlayable &&
+        getShowGroupKey(item) === currentShowKey,
+    )
+    .sort(sortEpisodes)
+  const currentIndex = episodes.findIndex(
+    (episode) => episode.id === currentItem.id,
+  )
+
+  if (currentIndex < 0) {
+    return createEmptyPlayerEpisodeSwitchOptions()
+  }
+
+  const previous = episodes[currentIndex - 1] ?? null
+  const next = episodes[currentIndex + 1] ?? null
+  const target =
+    targetId && previous?.id === targetId
+      ? previous
+      : targetId && next?.id === targetId
+        ? next
+        : null
+
+  return {
+    next,
+    previous,
+    target,
+  }
+}
+
+function createEmptyPlayerEpisodeSwitchOptions(): PlayerEpisodeSwitchOptions {
+  return {
+    next: null,
+    previous: null,
+    target: null,
+  }
+}
+
+function getShowGroupKey(item: MediaItem) {
+  return `${item.source}:${(item.showTitle ?? item.title).toLowerCase()}`
 }
 
 function clampFocus(focus: FocusPosition, sections: TvSection[]) {
@@ -2320,6 +2538,12 @@ function getDetailItemClassName(isSelected: boolean, isMenuSelected: boolean) {
     isSelected ? 'selected' : '',
     isMenuSelected ? 'menu-selected' : '',
   ]
+    .filter(Boolean)
+    .join(' ')
+}
+
+function getPlayerEpisodeSwitchButtonClassName(isSelected: boolean) {
+  return ['tv-player-episode-button', isSelected ? 'selected' : '']
     .filter(Boolean)
     .join(' ')
 }
