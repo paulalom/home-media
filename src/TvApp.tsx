@@ -714,9 +714,7 @@ function TvApp() {
 
   function handlePlayerAction(action: RemoteAction, event: KeyboardEvent) {
     if (action === 'down') {
-      const player = playerRef.current
-
-      if (player?.paused && !playerScanPreviewRef.current) {
+      if (!playerScanPreviewRef.current) {
         showPlayerBlackout()
       }
 
