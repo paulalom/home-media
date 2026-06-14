@@ -188,6 +188,7 @@ function TvApp() {
     duration: 0,
     position: 0,
   })
+  const [playerBlackoutVisible, setPlayerBlackoutVisible] = useState(false)
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null)
@@ -625,6 +626,18 @@ function TvApp() {
   }
 
   function handlePlayerAction(action: RemoteAction, event: KeyboardEvent) {
+    if (action === 'down') {
+      const player = playerRef.current
+
+      if (player?.paused && !playerScanPreviewRef.current) {
+        setPlayerBlackoutVisible(true)
+      }
+
+      return
+    }
+
+    setPlayerBlackoutVisible(false)
+
     if (action === 'back') {
       if (playerScanPreviewRef.current) {
         cancelScanPreview()
@@ -899,6 +912,7 @@ function TvApp() {
       duration: 0,
       position: 0,
     })
+    setPlayerBlackoutVisible(false)
     setPlayerHudVisible(true)
     setPlayerItem(item)
   }
@@ -912,6 +926,7 @@ function TvApp() {
     clearScanPreview()
     clearScanPreviewImages()
     clearPlayerHudTimeout()
+    setPlayerBlackoutVisible(false)
     setPlayerItem(null)
   }
 
@@ -1470,6 +1485,7 @@ function TvApp() {
           onEnded={(event) => {
             clearScanPreview()
             clearPlayerHudTimeout()
+            setPlayerBlackoutVisible(false)
             updatePlayerClock(event.currentTarget)
             recordPlayback(playerItem, event.currentTarget, true)
             setPlayerItem(null)
@@ -1481,10 +1497,12 @@ function TvApp() {
             recordPlayback(playerItem, event.currentTarget, true)
           }}
           onPlay={(event) => {
+            setPlayerBlackoutVisible(false)
             updatePlayerClock(event.currentTarget)
             showPlayerHud(true)
           }}
           onPlaying={(event) => {
+            setPlayerBlackoutVisible(false)
             updatePlayerClock(event.currentTarget)
             showPlayerHud(true)
           }}
@@ -1507,6 +1525,9 @@ function TvApp() {
           ref={playerRef}
           src={resolveMediaUrl(playerItem.streamUrl, apiBase)}
         />
+        {playerBlackoutVisible ? (
+          <div className="tv-player-blackout" aria-hidden="true" />
+        ) : null}
         <div className={playerInfoClassName}>
           {scanPreview ? (
             <>

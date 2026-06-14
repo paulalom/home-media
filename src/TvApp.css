@@ -639,6 +639,14 @@ button {
   width: 100vw;
 }
 
+.tv-player-blackout {
+  background: #000000;
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 4;
+}
+
 .tv-player-info {
   background: rgb(5 6 7 / 76%);
   border: 1px solid rgb(247 244 237 / 16%);
@@ -652,6 +660,7 @@ button {
   transition:
     opacity 160ms ease,
     transform 160ms ease;
+  z-index: 2;
 }
 
 .tv-player-info.scanning {
