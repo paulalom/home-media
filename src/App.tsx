@@ -88,6 +88,7 @@ type PreviewCacheStatus = {
   cacheSizeLabel: string
   cachedFrames: number
   completedVideos: number
+  cpuBudget: number
   currentTitle?: string
   failedFrames: number
   failedVideos: number
@@ -101,6 +102,7 @@ type PreviewCacheStatus = {
   totalVideos: number
   updatedAt: string
   width: number
+  warmMode: 'background' | 'foreground'
 }
 
 type MovieTitle = {
@@ -1436,9 +1438,14 @@ function formatNumber(value: number) {
 
 function formatPreviewCacheState(status: PreviewCacheStatus) {
   if (status.state === 'warming') {
+    const modeLabel =
+      status.warmMode === 'background'
+        ? `${Math.round(status.cpuBudget * 100)}%`
+        : 'Fast'
+
     return status.pendingFrames > 0
-      ? `Warming ${formatNumber(status.pendingFrames)}`
-      : 'Warming'
+      ? `Warming ${formatNumber(status.pendingFrames)} (${modeLabel})`
+      : `Warming (${modeLabel})`
   }
 
   if (status.state === 'clearing') {

@@ -117,6 +117,7 @@ type PreviewCacheStatus = {
   cacheSizeLabel: string
   cachedFrames: number
   completedVideos: number
+  cpuBudget: number
   currentTitle?: string
   failedFrames: number
   failedVideos: number
@@ -131,9 +132,21 @@ type PreviewCacheStatus = {
   totalVideos: number
   updatedAt: string
   width: number
+  warmMode: PreviewCacheWarmMode
 }
 
 type PreviewFrameQuality = keyof typeof PREVIEW_FRAME_SETTINGS
+
+type PreviewCacheWarmMode = 'background' | 'foreground'
+
+type PreviewCacheWarmRequest = {
+  library: LibraryResponse
+  mode: PreviewCacheWarmMode
+}
+
+type PreviewFrameGenerationOptions = {
+  threads?: number
+}
 
 type TmdbCredentials =
   | {
@@ -206,7 +219,11 @@ const PREVIEW_FRAME_SETTINGS = {
 } as const
 const PREVIEW_CACHE_FRAME_INTERVAL_SECONDS = 5
 const PREVIEW_CACHE_QUALITY: PreviewFrameQuality = 'low'
-const PREVIEW_CACHE_WARM_CONCURRENCY = 2
+const PREVIEW_CACHE_BACKGROUND_CPU_BUDGET = 0.25
+const PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS = 1
+const PREVIEW_CACHE_BACKGROUND_WARM_CONCURRENCY = 1
+const PREVIEW_CACHE_FOREGROUND_CPU_BUDGET = 1
+const PREVIEW_CACHE_FOREGROUND_WARM_CONCURRENCY = 2
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -242,8 +259,9 @@ const MAX_JSON_BODY_BYTES = 64 * 1024
 let libraryCache: LibraryCache | null = null
 const artworkFetches = new Map<string, Promise<ResolvedArtwork | null>>()
 const previewCacheActiveWarmFrames = new Set<Promise<void>>()
+let previewCacheWarmMode: PreviewCacheWarmMode = 'background'
 let previewCacheStatus = createInitialPreviewCacheStatus()
-let previewCacheWarmRequest: LibraryResponse | null = null
+let previewCacheWarmRequest: PreviewCacheWarmRequest | null = null
 let previewCacheWarmRunId = 0
 let previewCacheWarmRunning = false
 const previewFrameFetches = new Map<string, Promise<string>>()
@@ -358,7 +376,10 @@ export async function handleMediaApi(
     try {
       sendJson(
         res,
-        await getCachedLibrary(url.searchParams.get('refresh') === '1'),
+        await getCachedLibrary(
+          url.searchParams.get('refresh') === '1',
+          'background',
+        ),
       )
     } catch (error) {
       sendError(res, getErrorStatusCode(error), getErrorMessage(error))
@@ -380,7 +401,7 @@ export async function handleMediaApi(
 
     if (req.method === 'POST') {
       try {
-        ensurePreviewCacheWarm(await getCachedLibrary(false))
+        ensurePreviewCacheWarm(await getCachedLibrary(false, null), 'foreground')
         sendJson(res, await getPreviewCacheStatus())
       } catch (error) {
         sendError(res, getErrorStatusCode(error), getErrorMessage(error))
@@ -517,7 +538,10 @@ export async function handleMediaApi(
   return false
 }
 
-async function getCachedLibrary(refresh: boolean) {
+async function getCachedLibrary(
+  refresh: boolean,
+  warmMode: PreviewCacheWarmMode | null = 'background',
+) {
   const root = getMediaRoot()
 
   if (!refresh && libraryCache?.root === root) {
@@ -529,13 +553,31 @@ async function getCachedLibrary(refresh: boolean) {
     data,
     root,
   }
-  ensurePreviewCacheWarm(data)
+
+  if (warmMode) {
+    ensurePreviewCacheWarm(data, warmMode)
+  }
 
   return data
 }
 
-function ensurePreviewCacheWarm(library: LibraryResponse) {
-  previewCacheWarmRequest = library
+function ensurePreviewCacheWarm(
+  library: LibraryResponse,
+  mode: PreviewCacheWarmMode,
+) {
+  previewCacheWarmRequest = {
+    library,
+    mode,
+  }
+
+  if (mode === 'foreground') {
+    previewCacheWarmMode = mode
+    previewCacheStatus = {
+      ...previewCacheStatus,
+      ...getPreviewCacheWarmStatusFields(mode),
+      updatedAt: new Date().toISOString(),
+    }
+  }
 
   if (!previewCacheWarmRunning) {
     void runPreviewCacheWarmLoop().catch((error: unknown) => {
@@ -560,17 +602,20 @@ async function runPreviewCacheWarmLoop() {
 
   try {
     while (previewCacheWarmRequest) {
-      const library = previewCacheWarmRequest
+      const request = previewCacheWarmRequest
       const runId = ++previewCacheWarmRunId
 
       previewCacheWarmRequest = null
-      await warmPreviewCacheForLibrary(library, runId)
+      previewCacheWarmMode = request.mode
+      await warmPreviewCacheForLibrary(request.library, runId)
     }
   } finally {
     previewCacheWarmRunning = false
 
     if (previewCacheWarmRequest) {
-      ensurePreviewCacheWarm(previewCacheWarmRequest)
+      const request = previewCacheWarmRequest
+
+      ensurePreviewCacheWarm(request.library, request.mode)
     }
   }
 }
@@ -584,6 +629,7 @@ async function warmPreviewCacheForLibrary(
 
   previewCacheStatus = {
     ...createInitialPreviewCacheStatus('warming'),
+    ...getPreviewCacheWarmStatusFields(previewCacheWarmMode),
     startedAt,
     totalVideos: items.length,
     updatedAt: startedAt,
@@ -611,7 +657,7 @@ async function warmPreviewCacheForLibrary(
 async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
   previewCacheStatus = {
     ...previewCacheStatus,
-    currentTitle: item.title,
+    currentTitle: getMediaItemDisplayTitle(item),
     updatedAt: new Date().toISOString(),
   }
 
@@ -674,19 +720,24 @@ async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
 
     await runWithConcurrency(
       missingFrameTimes,
-      PREVIEW_CACHE_WARM_CONCURRENCY,
+      getPreviewCacheWarmSettings().concurrency,
       async (frameTime) => {
         if (runId !== previewCacheWarmRunId) {
           return
         }
 
         try {
+          const generationStartedAt = Date.now()
+          const warmSettings = getPreviewCacheWarmSettings()
           const generationPromise = resolvePreviewFrame(
             item.id,
             mediaPath,
             stats,
             frameTime,
             PREVIEW_CACHE_QUALITY,
+            {
+              threads: warmSettings.ffmpegThreads,
+            },
           ).then(() => undefined)
 
           previewCacheActiveWarmFrames.add(generationPromise)
@@ -707,6 +758,8 @@ async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
             pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
             updatedAt: new Date().toISOString(),
           }
+
+          await throttlePreviewCacheWarm(generationStartedAt, runId)
         } catch (error) {
           if (runId !== previewCacheWarmRunId) {
             return
@@ -794,6 +847,7 @@ function createInitialPreviewCacheStatus(
     cacheSizeLabel: formatBytes(0),
     cachedFrames: 0,
     completedVideos: 0,
+    ...getPreviewCacheWarmStatusFields(previewCacheWarmMode),
     failedFrames: 0,
     failedVideos: 0,
     generatedFrames: 0,
@@ -805,6 +859,49 @@ function createInitialPreviewCacheStatus(
     totalVideos: 0,
     updatedAt: new Date().toISOString(),
     width: PREVIEW_FRAME_SETTINGS[PREVIEW_CACHE_QUALITY].width,
+  }
+}
+
+function getPreviewCacheWarmStatusFields(mode: PreviewCacheWarmMode) {
+  const settings = getPreviewCacheWarmSettings(mode)
+
+  return {
+    cpuBudget: settings.cpuBudget,
+    warmMode: mode,
+  }
+}
+
+function getPreviewCacheWarmSettings(mode = previewCacheWarmMode) {
+  if (mode === 'foreground') {
+    return {
+      concurrency: PREVIEW_CACHE_FOREGROUND_WARM_CONCURRENCY,
+      cpuBudget: PREVIEW_CACHE_FOREGROUND_CPU_BUDGET,
+      ffmpegThreads: undefined,
+    }
+  }
+
+  return {
+    concurrency: PREVIEW_CACHE_BACKGROUND_WARM_CONCURRENCY,
+    cpuBudget: PREVIEW_CACHE_BACKGROUND_CPU_BUDGET,
+    ffmpegThreads: PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS,
+  }
+}
+
+async function throttlePreviewCacheWarm(startedAt: number, runId: number) {
+  const settings = getPreviewCacheWarmSettings()
+
+  if (
+    settings.cpuBudget >= PREVIEW_CACHE_FOREGROUND_CPU_BUDGET ||
+    runId !== previewCacheWarmRunId
+  ) {
+    return
+  }
+
+  const elapsedMs = Date.now() - startedAt
+  const delayMs = Math.ceil(elapsedMs * (1 / settings.cpuBudget - 1))
+
+  if (delayMs > 0) {
+    await sleep(delayMs)
   }
 }
 
@@ -842,6 +939,12 @@ function runWithConcurrency<T>(
   })
 
   return Promise.all(workers)
+}
+
+function sleep(delayMs: number) {
+  return new Promise<void>((resolvePromise) => {
+    setTimeout(resolvePromise, delayMs)
+  })
 }
 
 async function getDirectoryStats(directory: string): Promise<{
@@ -1086,6 +1189,7 @@ async function resolvePreviewFrame(
   stats: Stats,
   frameTime: number,
   quality: PreviewFrameQuality,
+  options: PreviewFrameGenerationOptions = {},
 ) {
   const framePath = getPreviewFramePath(mediaId, stats, frameTime, quality)
 
@@ -1104,6 +1208,7 @@ async function resolvePreviewFrame(
     framePath,
     frameTime,
     quality,
+    options,
   )
 
   previewFrameFetches.set(framePath, fetchPromise)
@@ -1122,10 +1227,16 @@ async function generatePreviewFrame(
   framePath: string,
   frameTime: number,
   quality: PreviewFrameQuality,
+  options: PreviewFrameGenerationOptions = {},
 ) {
   const settings = PREVIEW_FRAME_SETTINGS[quality]
   const tempPath = `${framePath}.${Date.now()}.tmp`
-  const imageBytes = await extractPreviewFrame(mediaPath, frameTime, settings)
+  const imageBytes = await extractPreviewFrame(
+    mediaPath,
+    frameTime,
+    settings,
+    options,
+  )
 
   await fs.mkdir(dirname(framePath), { recursive: true })
   await fs.writeFile(tempPath, imageBytes)
@@ -1138,8 +1249,12 @@ function extractPreviewFrame(
   mediaPath: string,
   frameTime: number,
   settings: (typeof PREVIEW_FRAME_SETTINGS)[PreviewFrameQuality],
+  options: PreviewFrameGenerationOptions = {},
 ) {
   return new Promise<Buffer>((resolvePromise, rejectPromise) => {
+    const threadArgs = options.threads
+      ? ['-threads', String(options.threads)]
+      : []
     const ffmpeg = spawn(
       getFfmpegExecutable(),
       [
@@ -1149,6 +1264,7 @@ function extractPreviewFrame(
         '-ss',
         formatFfmpegTime(frameTime),
         ...(settings.fastSeek ? ['-noaccurate_seek'] : []),
+        ...threadArgs,
         '-i',
         mediaPath,
         '-map',
@@ -1162,6 +1278,7 @@ function extractPreviewFrame(
         `scale=${settings.width}:-2`,
         '-q:v',
         String(settings.jpegQuality),
+        ...threadArgs,
         '-f',
         'image2pipe',
         'pipe:1',
@@ -2158,6 +2275,26 @@ function getMediaMetadata(
     category: 'other',
     title: cleanTitle(basename(filename, extension)),
   }
+}
+
+function getMediaItemDisplayTitle(item: MediaItem) {
+  if (!item.showTitle) {
+    return item.title
+  }
+
+  const episodeCode =
+    item.seasonNumber && item.episodeNumber
+      ? ` S${String(item.seasonNumber).padStart(2, '0')}E${String(
+          item.episodeNumber,
+        ).padStart(2, '0')}`
+      : ''
+  const genericEpisodeTitle = item.episodeNumber
+    ? `Episode ${item.episodeNumber}`
+    : ''
+  const titleSuffix =
+    episodeCode && item.title === genericEpisodeTitle ? '' : ` - ${item.title}`
+
+  return `${item.showTitle}${episodeCode}${titleSuffix}`
 }
 
 function getMovieTitle(
