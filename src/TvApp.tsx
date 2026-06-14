@@ -6,6 +6,16 @@ import {
   type SyntheticEvent,
 } from 'react'
 import { Settings } from 'lucide-react'
+import {
+  deletePlaybackRecord,
+  fetchPlaybackHistory,
+  mergePlaybackHistories,
+  readLocalPlaybackHistory,
+  savePlaybackRecord,
+  writeLocalPlaybackHistory,
+  type PlaybackHistory,
+  type PlaybackRecord,
+} from './playback-metadata'
 
 type MediaCategory = 'movie' | 'show' | 'other'
 type RemoteAction =
@@ -51,15 +61,6 @@ type LibraryResponse = {
   }
   items: MediaItem[]
 }
-
-type PlaybackRecord = {
-  completed: boolean
-  duration: number
-  position: number
-  updatedAt: number
-}
-
-type PlaybackHistory = Record<string, PlaybackRecord>
 
 type TvTitle = {
   id: string
@@ -140,7 +141,6 @@ type HomeMediaWindow = Window & {
 }
 
 const apiBaseStorageKey = 'home-media-api-base-v1'
-const playbackStorageKey = 'home-media-playback-v1'
 const maxRowItems = 28
 const playerHudHideDelayMs = 1000
 const playerSeekStepSeconds = 5
@@ -179,7 +179,7 @@ function TvApp() {
   const [isLoading, setIsLoading] = useState(true)
   const [library, setLibrary] = useState<LibraryResponse | null>(null)
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
-    readPlaybackHistory,
+    readLocalPlaybackHistory,
   )
   const [playerClock, setPlayerClock] = useState<PlayerClock>({
     duration: 0,
@@ -215,11 +215,35 @@ function TvApp() {
 
   useEffect(() => {
     playbackHistoryRef.current = playbackHistory
-    window.localStorage.setItem(
-      playbackStorageKey,
-      JSON.stringify(playbackHistory),
-    )
+    writeLocalPlaybackHistory(playbackHistory)
   }, [playbackHistory])
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    fetchPlaybackHistory(apiBase, controller.signal)
+      .then((serverHistory) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        const nextHistory = mergePlaybackHistories(
+          playbackHistoryRef.current,
+          serverHistory,
+        )
+
+        setPlaybackHistory(nextHistory)
+
+        for (const [mediaId, record] of Object.entries(nextHistory)) {
+          if (serverHistory[mediaId]?.updatedAt !== record.updatedAt) {
+            void savePlaybackRecord(apiBase, mediaId, record).catch(() => undefined)
+          }
+        }
+      })
+      .catch(() => undefined)
+
+    return () => controller.abort()
+  }, [apiBase])
 
   useEffect(() => {
     return () => {
@@ -721,27 +745,38 @@ function TvApp() {
     }
 
     const now = getCurrentTimestamp()
+    const records = items.map((item, itemIndex) => {
+      const existingRecord = playbackHistoryRef.current[item.id]
+      const duration =
+        existingRecord?.duration && existingRecord.duration > 0
+          ? existingRecord.duration
+          : 1
+      const record: PlaybackRecord = {
+        completed: true,
+        duration,
+        position: duration,
+        updatedAt: now + itemIndex,
+      }
+
+      return {
+        item,
+        record,
+      }
+    })
 
     setPlaybackHistory((currentHistory) => {
       const nextHistory = { ...currentHistory }
 
-      for (const [itemIndex, item] of items.entries()) {
-        const existingRecord = currentHistory[item.id]
-        const duration =
-          existingRecord?.duration && existingRecord.duration > 0
-            ? existingRecord.duration
-            : 1
-
-        nextHistory[item.id] = {
-          completed: true,
-          duration,
-          position: duration,
-          updatedAt: now + itemIndex,
-        }
+      for (const { item, record } of records) {
+        nextHistory[item.id] = record
       }
 
       return nextHistory
     })
+
+    for (const { item, record } of records) {
+      void savePlaybackRecord(apiBase, item.id, record).catch(() => undefined)
+    }
   }
 
   function markItemsUnwatched(items: MediaItem[]) {
@@ -758,6 +793,10 @@ function TvApp() {
 
       return nextHistory
     })
+
+    for (const item of items) {
+      void deletePlaybackRecord(apiBase, item.id).catch(() => undefined)
+    }
   }
 
   function startPlayback(item: MediaItem | null) {
@@ -1129,15 +1168,18 @@ function TvApp() {
     }
 
     lastPlaybackWriteRef.current[item.id] = now
+    const record = {
+      completed: position / duration >= 0.95,
+      duration,
+      position,
+      updatedAt: now,
+    }
+
     setPlaybackHistory((currentHistory) => ({
       ...currentHistory,
-      [item.id]: {
-        completed: position / duration >= 0.95,
-        duration,
-        position,
-        updatedAt: now,
-      },
+      [item.id]: record,
     }))
+    void savePlaybackRecord(apiBase, item.id, record).catch(() => undefined)
   }
 
   useEffect(() => {
@@ -1844,16 +1886,6 @@ function registerSamsungRemoteKeys() {
     }
   } catch {
     // Browsers and some TV runtimes can reject key registration; keydown still works there.
-  }
-}
-
-function readPlaybackHistory(): PlaybackHistory {
-  try {
-    const value = window.localStorage.getItem(playbackStorageKey)
-
-    return value ? (JSON.parse(value) as PlaybackHistory) : {}
-  } catch {
-    return {}
   }
 }
 

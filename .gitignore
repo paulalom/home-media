@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Local Home Media runtime data
+.home-media/
+home-media-data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

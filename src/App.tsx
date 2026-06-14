@@ -24,6 +24,15 @@ import {
   Video,
   type LucideIcon,
 } from 'lucide-react'
+import {
+  fetchPlaybackHistory,
+  mergePlaybackHistories,
+  readLocalPlaybackHistory,
+  savePlaybackRecord,
+  writeLocalPlaybackHistory,
+  type PlaybackHistory,
+  type PlaybackRecord,
+} from './playback-metadata'
 import './App.css'
 
 type MediaCategory = 'movie' | 'show' | 'other'
@@ -70,15 +79,6 @@ type LibraryResponse = {
   sources: SourceSummary[]
   items: MediaItem[]
 }
-
-type PlaybackRecord = {
-  completed: boolean
-  duration: number
-  position: number
-  updatedAt: number
-}
-
-type PlaybackHistory = Record<string, PlaybackRecord>
 
 type MovieTitle = {
   id: string
@@ -136,7 +136,6 @@ type HomeMediaWindow = Window & {
   }
 }
 
-const playbackStorageKey = 'home-media-playback-v1'
 const apiBaseStorageKey = 'home-media-api-base-v1'
 const viewModes: ViewMode[] = ['Home', 'Movies', 'TV Shows']
 
@@ -168,7 +167,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(true)
   const [library, setLibrary] = useState<LibraryResponse | null>(null)
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
-    readPlaybackHistory,
+    readLocalPlaybackHistory,
   )
   const [query, setQuery] = useState('')
   const [scanRunning, setScanRunning] = useState(false)
@@ -183,11 +182,35 @@ function App() {
 
   useEffect(() => {
     playbackHistoryRef.current = playbackHistory
-    window.localStorage.setItem(
-      playbackStorageKey,
-      JSON.stringify(playbackHistory),
-    )
+    writeLocalPlaybackHistory(playbackHistory)
   }, [playbackHistory])
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    fetchPlaybackHistory(apiBase, controller.signal)
+      .then((serverHistory) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        const nextHistory = mergePlaybackHistories(
+          playbackHistoryRef.current,
+          serverHistory,
+        )
+
+        setPlaybackHistory(nextHistory)
+
+        for (const [mediaId, record] of Object.entries(nextHistory)) {
+          if (serverHistory[mediaId]?.updatedAt !== record.updatedAt) {
+            void savePlaybackRecord(apiBase, mediaId, record).catch(() => undefined)
+          }
+        }
+      })
+      .catch(() => undefined)
+
+    return () => controller.abort()
+  }, [apiBase])
 
   useEffect(() => {
     if (apiBase) {
@@ -456,15 +479,18 @@ function App() {
     }
 
     lastPlaybackWriteRef.current[item.id] = now
+    const record = {
+      completed: position / duration >= 0.95,
+      duration,
+      position,
+      updatedAt: now,
+    }
+
     setPlaybackHistory((currentHistory) => ({
       ...currentHistory,
-      [item.id]: {
-        completed: position / duration >= 0.95,
-        duration,
-        position,
-        updatedAt: now,
-      },
+      [item.id]: record,
     }))
+    void savePlaybackRecord(apiBase, item.id, record).catch(() => undefined)
   }
 
   function saveApiSettings(event: FormEvent<HTMLFormElement>) {
@@ -1025,16 +1051,6 @@ function sortEpisodes(first: MediaItem, second: MediaItem) {
       sensitivity: 'base',
     })
   )
-}
-
-function readPlaybackHistory(): PlaybackHistory {
-  try {
-    const value = window.localStorage.getItem(playbackStorageKey)
-
-    return value ? (JSON.parse(value) as PlaybackHistory) : {}
-  } catch {
-    return {}
-  }
 }
 
 function readInitialApiBase() {

@@ -13,6 +13,12 @@ import {
   relative,
   resolve,
 } from 'node:path'
+import {
+  parsePlaybackRecord,
+  readPlaybackHistory,
+  removePlaybackRecord,
+  upsertPlaybackRecord,
+} from './metadata-store'
 
 export type MediaCategory = 'movie' | 'show' | 'other'
 
@@ -195,11 +201,13 @@ const IMAGE_EXTENSION_BY_MIME = new Map([
 ])
 const API_CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Range',
-  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Methods':
+    'DELETE, GET, HEAD, OPTIONS, PATCH, PUT',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Expose-Headers':
     'Accept-Ranges, Content-Length, Content-Range, Content-Type',
 }
+const MAX_JSON_BODY_BYTES = 64 * 1024
 let libraryCache: LibraryCache | null = null
 const artworkFetches = new Map<string, Promise<ResolvedArtwork | null>>()
 const previewFrameFetches = new Map<string, Promise<string>>()
@@ -291,6 +299,8 @@ export async function handleMediaApi(
   const url = new URL(req.url ?? '/', 'http://home-media.local')
   const isApiPath =
     url.pathname === '/api/library' ||
+    url.pathname === '/api/playback' ||
+    /^\/api\/playback\/[^/]+$/.test(url.pathname) ||
     /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|stream)$/.test(
       url.pathname,
     )
@@ -314,7 +324,59 @@ export async function handleMediaApi(
         await getCachedLibrary(url.searchParams.get('refresh') === '1'),
       )
     } catch (error) {
-      sendError(res, 500, getErrorMessage(error))
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+    }
+
+    return true
+  }
+
+  if (url.pathname === '/api/playback') {
+    if (req.method !== 'GET') {
+      sendMethodNotAllowed(res, ['GET'])
+      return true
+    }
+
+    try {
+      sendJson(res, await readPlaybackHistory())
+    } catch (error) {
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+    }
+
+    return true
+  }
+
+  const playbackMatch = /^\/api\/playback\/([^/]+)$/.exec(url.pathname)
+
+  if (playbackMatch) {
+    if (req.method !== 'DELETE' && req.method !== 'PATCH' && req.method !== 'PUT') {
+      sendMethodNotAllowed(res, ['DELETE', 'PATCH', 'PUT'])
+      return true
+    }
+
+    const mediaId = decodeUrlSegment(playbackMatch[1])
+
+    if (!mediaId) {
+      sendError(res, 400, 'Invalid media id')
+      return true
+    }
+
+    try {
+      if (req.method === 'DELETE') {
+        await removePlaybackRecord(mediaId)
+        sendNoContent(res)
+        return true
+      }
+
+      const playbackRecord = parsePlaybackRecord(await readJsonBody(req))
+
+      if (!playbackRecord) {
+        sendError(res, 400, 'Invalid playback record')
+        return true
+      }
+
+      sendJson(res, await upsertPlaybackRecord(mediaId, playbackRecord))
+    } catch (error) {
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
     }
 
     return true
@@ -1614,6 +1676,11 @@ function sendJson(res: ServerResponse, payload: unknown) {
   res.end(JSON.stringify(payload))
 }
 
+function sendNoContent(res: ServerResponse) {
+  res.writeHead(204, API_CORS_HEADERS)
+  res.end()
+}
+
 function sendMethodNotAllowed(res: ServerResponse, allowedMethods: string[]) {
   res.writeHead(405, {
     ...API_CORS_HEADERS,
@@ -1631,6 +1698,84 @@ function sendError(res: ServerResponse, statusCode: number, message: string) {
   res.end(JSON.stringify({ error: message }))
 }
 
+function readJsonBody(req: IncomingMessage) {
+  return new Promise<unknown>((resolvePromise, rejectPromise) => {
+    const chunks: Buffer[] = []
+    let byteLength = 0
+    let settled = false
+
+    function rejectOnce(error: Error) {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      rejectPromise(error)
+    }
+
+    req.on('data', (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+
+      byteLength += buffer.byteLength
+
+      if (byteLength > MAX_JSON_BODY_BYTES) {
+        rejectOnce(createHttpError(413, 'Request body is too large'))
+        req.destroy()
+        return
+      }
+
+      chunks.push(buffer)
+    })
+
+    req.on('end', () => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+
+      const body = Buffer.concat(chunks, byteLength).toString('utf8').trim()
+
+      if (!body) {
+        resolvePromise(null)
+        return
+      }
+
+      try {
+        resolvePromise(JSON.parse(body))
+      } catch {
+        rejectPromise(createHttpError(400, 'Request body is not valid JSON'))
+      }
+    })
+
+    req.on('error', rejectOnce)
+  })
+}
+
+function decodeUrlSegment(value: string) {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return null
+  }
+}
+
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Unexpected server error'
+}
+
+function getErrorStatusCode(error: unknown) {
+  return isRecord(error) && typeof error.statusCode === 'number'
+    ? error.statusCode
+    : 500
+}
+
+function createHttpError(statusCode: number, message: string) {
+  const error = new Error(message) as Error & {
+    statusCode: number
+  }
+
+  error.statusCode = statusCode
+
+  return error
 }
