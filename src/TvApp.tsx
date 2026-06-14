@@ -187,6 +187,11 @@ function TvApp() {
   })
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
+  const [scanPreviewFrameFallback, setScanPreviewFrameFallback] =
+    useState(false)
+  const [loadedScanPreviewFrameUrl, setLoadedScanPreviewFrameUrl] = useState<
+    string | null
+  >(null)
   const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null)
   const playbackHistoryRef = useRef(playbackHistory)
   const detailListRef = useRef<HTMLDivElement | null>(null)
@@ -199,9 +204,14 @@ function TvApp() {
   const playerScanLastTickRef = useRef<number | null>(null)
   const playerScanPreviewRef = useRef<ScanPreview | null>(null)
   const playerRef = useRef<HTMLVideoElement | null>(null)
+  const previewVideoRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
   const selectedCardRef = useRef<HTMLButtonElement | null>(null)
   const selectedRowRef = useRef<HTMLElement | null>(null)
+  const scanPreviewFrameUrl =
+    playerItem && scanPreview
+      ? getScanPreviewFrameUrl(playerItem, scanPreview, apiBase)
+      : ''
 
   useEffect(() => {
     playbackHistoryRef.current = playbackHistory
@@ -236,6 +246,39 @@ function TvApp() {
   useEffect(() => {
     playerScanPreviewRef.current = scanPreview
   }, [scanPreview])
+
+  useEffect(() => {
+    if (
+      !scanPreviewFrameUrl ||
+      loadedScanPreviewFrameUrl === scanPreviewFrameUrl
+    ) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setScanPreviewFrameFallback(true)
+    }, 1800)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [loadedScanPreviewFrameUrl, scanPreviewFrameUrl])
+
+  useEffect(() => {
+    if (!scanPreview || !scanPreviewFrameFallback) {
+      return
+    }
+
+    const previewVideo = previewVideoRef.current
+
+    if (!previewVideo || previewVideo.readyState < 1) {
+      return
+    }
+
+    try {
+      previewVideo.currentTime = scanPreview.position
+    } catch {
+      // The fallback video is best-effort for devices that cannot load frames.
+    }
+  }, [scanPreview, scanPreviewFrameFallback])
 
   useEffect(() => {
     registerSamsungRemoteKeys()
@@ -899,6 +942,8 @@ function TvApp() {
     playerScanHeldDirectionRef.current = null
 
     if (resetState) {
+      setLoadedScanPreviewFrameUrl(null)
+      setScanPreviewFrameFallback(false)
       setScanPreviewState(null)
     } else {
       playerScanPreviewRef.current = null
@@ -1150,9 +1195,6 @@ function TvApp() {
       playerClock.position,
       playerClock.duration,
     )
-    const scanPreviewFrameUrl = scanPreview
-      ? getScanPreviewFrameUrl(playerItem, scanPreview, apiBase)
-      : ''
 
     return (
       <main className="tv-player-shell">
@@ -1204,15 +1246,48 @@ function TvApp() {
         <div className={playerInfoClassName}>
           {scanPreview ? (
             <>
-              <div className="tv-scan-thumbnail">
+              <div
+                className="tv-scan-thumbnail"
+                style={
+                  loadedScanPreviewFrameUrl
+                    ? {
+                        backgroundImage: `url(${loadedScanPreviewFrameUrl})`,
+                      }
+                    : undefined
+                }
+              >
+                {scanPreviewFrameFallback ? (
+                  <video
+                    className="tv-scan-thumbnail-video"
+                    muted
+                    onLoadedMetadata={(event) => {
+                      try {
+                        event.currentTarget.currentTime = scanPreview.position
+                      } catch {
+                        // Some TV runtimes reject preview seeks until ready.
+                      }
+                    }}
+                    playsInline
+                    preload="metadata"
+                    ref={previewVideoRef}
+                    src={resolveMediaUrl(playerItem.streamUrl, apiBase)}
+                  />
+                ) : null}
                 <img
                   alt=""
-                  className="tv-scan-thumbnail-image"
+                  className={
+                    scanPreviewFrameFallback
+                      ? 'tv-scan-thumbnail-image loading-probe'
+                      : 'tv-scan-thumbnail-image'
+                  }
                   decoding="async"
                   draggable={false}
                   loading="eager"
-                  onError={hideFailedArtwork}
-                  onLoad={showLoadedImage}
+                  onError={() => setScanPreviewFrameFallback(true)}
+                  onLoad={(event) => {
+                    setLoadedScanPreviewFrameUrl(event.currentTarget.src)
+                    setScanPreviewFrameFallback(false)
+                  }}
                   src={scanPreviewFrameUrl}
                 />
                 <span>{formatDuration(scanPreview.position)}</span>
@@ -1775,10 +1850,6 @@ function hideFailedArtwork(event: SyntheticEvent<HTMLImageElement>) {
   event.currentTarget.hidden = true
 }
 
-function showLoadedImage(event: SyntheticEvent<HTMLImageElement>) {
-  event.currentTarget.hidden = false
-}
-
 function readInitialApiBase() {
   try {
     const params = new URLSearchParams(window.location.search)
@@ -2057,7 +2128,7 @@ function getNextScanSpeedIndex(
     return 0
   }
 
-  return (preview.speedIndex + 1) % scanSpeedMultipliers.length
+  return Math.min(preview.speedIndex + 1, scanSpeedMultipliers.length - 1)
 }
 
 function getProgressPercent(position: number, duration: number) {

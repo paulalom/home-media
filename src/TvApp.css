@@ -695,20 +695,32 @@ button {
 }
 
 .tv-scan-thumbnail {
-  aspect-ratio: 16 / 9;
   background: #000000;
+  background-position: center;
+  background-size: cover;
   border: 1px solid rgb(247 244 237 / 18%);
   border-radius: 8px;
+  height: 371px;
+  max-height: 31.5vw;
+  max-width: 56vw;
   overflow: hidden;
   position: relative;
-  width: min(660px, 56vw);
+  width: 660px;
 }
 
-.tv-scan-thumbnail-image {
+.tv-scan-thumbnail-image,
+.tv-scan-thumbnail-video {
   display: block;
   height: 100%;
+  inset: 0;
   object-fit: cover;
+  position: absolute;
   width: 100%;
+}
+
+.tv-scan-thumbnail-image.loading-probe {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .tv-scan-thumbnail span {
@@ -721,6 +733,7 @@ button {
   padding: 4px 7px;
   position: absolute;
   right: 8px;
+  z-index: 1;
 }
 
 .tv-scan-details {
@@ -814,7 +827,10 @@ button {
   }
 
   .tv-scan-thumbnail {
-    width: 52vw;
+    height: 293px;
+    max-height: 29.25vw;
+    max-width: 52vw;
+    width: 520px;
   }
 }
 
@@ -825,6 +841,9 @@ button {
   }
 
   .tv-scan-thumbnail {
+    height: 56.25vw;
+    max-height: none;
+    max-width: 100%;
     width: 100%;
   }
 }
