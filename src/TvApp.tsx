@@ -586,6 +586,11 @@ function TvApp() {
       return
     }
 
+    if (action === 'up') {
+      revealPlayerHud()
+      return
+    }
+
     if (action === 'pause') {
       if (pauseScanPreview()) {
         return
@@ -861,6 +866,16 @@ function TvApp() {
   function pausePlayer() {
     showPlayerHud()
     playerRef.current?.pause()
+  }
+
+  function revealPlayerHud() {
+    const player = playerRef.current
+
+    if (player) {
+      updatePlayerClock(player)
+    }
+
+    showPlayerHud()
   }
 
   function togglePlayer() {
