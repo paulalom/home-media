@@ -3,6 +3,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type SyntheticEvent,
 } from 'react'
 import { Check, ChevronLeft, ChevronRight, Settings } from 'lucide-react'
@@ -105,6 +106,36 @@ type ScanPreview = {
   speedIndex: number
 }
 
+type ScanPreviewVisualRequest = {
+  kind: 'image' | 'sprite'
+  key: string
+  url: string
+}
+
+type ScanPreviewVisual =
+  | {
+      kind: 'image'
+      key: string
+      url: string
+    }
+  | {
+      column: number
+      columns: number
+      kind: 'sprite'
+      key: string
+      row: number
+      rows: number
+      sheetUrl: string
+    }
+
+type PreviewSpriteResponse = {
+  column: number
+  columns: number
+  row: number
+  rows: number
+  sheetUrl: string
+}
+
 type PlayerEpisodeSwitchOptions = {
   next: MediaItem | null
   previous: MediaItem | null
@@ -200,8 +231,8 @@ function TvApp() {
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null)
-  const [scanPreviewVisibleFrameUrl, setScanPreviewVisibleFrameUrl] =
-    useState('')
+  const [scanPreviewVisibleVisual, setScanPreviewVisibleVisual] =
+    useState<ScanPreviewVisual | null>(null)
   const playbackHistoryRef = useRef(playbackHistory)
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
@@ -219,15 +250,21 @@ function TvApp() {
   )
   const playerScanPreloadKeyRef = useRef('')
   const playerScanPreviewRef = useRef<ScanPreview | null>(null)
+  const playerScanVisualCacheRef = useRef<Map<string, ScanPreviewVisual>>(
+    new Map(),
+  )
   const playerScanWasPlayingRef = useRef(false)
   const playerRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
   const selectedCardRef = useRef<HTMLButtonElement | null>(null)
   const selectedRowRef = useRef<HTMLElement | null>(null)
-  const scanPreviewFrameUrl =
+  const scanPreviewVisualRequest =
     playerItem && scanPreview
-      ? getScanPreviewFrameUrl(playerItem, scanPreview, apiBase)
-      : ''
+      ? getScanPreviewVisualRequest(playerItem, scanPreview, apiBase)
+      : null
+  const scanPreviewVisualRequestKey = scanPreviewVisualRequest?.key ?? ''
+  const scanPreviewVisualRequestKind = scanPreviewVisualRequest?.kind ?? null
+  const scanPreviewVisualRequestUrl = scanPreviewVisualRequest?.url ?? ''
 
   useEffect(() => {
     playbackHistoryRef.current = playbackHistory
@@ -264,6 +301,7 @@ function TvApp() {
   useEffect(() => {
     const loadedFrameUrls = playerScanLoadedFrameUrlsRef.current
     const preloadImages = playerScanPreloadImagesRef.current
+    const visualCache = playerScanVisualCacheRef.current
 
     return () => {
       if (playerHudTimeoutRef.current !== null) {
@@ -291,6 +329,7 @@ function TvApp() {
       loadedFrameUrls.clear()
       preloadImages.clear()
       playerScanPreloadKeyRef.current = ''
+      visualCache.clear()
       playerScanPreviewRef.current = null
       playerScanWasPlayingRef.current = false
     }
@@ -301,39 +340,60 @@ function TvApp() {
   }, [scanPreview])
 
   useEffect(() => {
-    if (!scanPreviewFrameUrl) {
+    if (!scanPreviewVisualRequestKind || !scanPreviewVisualRequestUrl) {
       playerScanFrameLoadTokenRef.current += 1
       return
     }
 
     const loadToken = playerScanFrameLoadTokenRef.current + 1
+    const controller = new AbortController()
+    const request: ScanPreviewVisualRequest = {
+      key: scanPreviewVisualRequestKey,
+      kind: scanPreviewVisualRequestKind,
+      url: scanPreviewVisualRequestUrl,
+    }
 
     playerScanFrameLoadTokenRef.current = loadToken
 
-    if (playerScanLoadedFrameUrlsRef.current.has(scanPreviewFrameUrl)) {
+    const cachedVisual = playerScanVisualCacheRef.current.get(
+      request.key,
+    )
+
+    if (cachedVisual) {
       const timeoutId = window.setTimeout(() => {
         if (playerScanFrameLoadTokenRef.current === loadToken) {
-          setScanPreviewVisibleFrameUrl(scanPreviewFrameUrl)
+          setScanPreviewVisibleVisual(cachedVisual)
         }
       }, 0)
 
-      return () => window.clearTimeout(timeoutId)
+      return () => {
+        controller.abort()
+        window.clearTimeout(timeoutId)
+      }
     }
 
-    const image = new Image()
+    loadScanPreviewVisual(
+      request,
+      apiBase,
+      controller.signal,
+      markScanPreviewFrameReady,
+    )
+      .then((visual) => {
+        playerScanVisualCacheRef.current.set(visual.key, visual)
 
-    image.decoding = 'async'
-    image.onload = () => {
-      markScanPreviewFrameReady(image, scanPreviewFrameUrl, () => {
-        if (playerScanFrameLoadTokenRef.current !== loadToken) {
-          return
+        if (playerScanFrameLoadTokenRef.current === loadToken) {
+          setScanPreviewVisibleVisual(visual)
         }
-
-        setScanPreviewVisibleFrameUrl(scanPreviewFrameUrl)
       })
-    }
-    image.src = scanPreviewFrameUrl
-  }, [scanPreviewFrameUrl])
+      .catch(() => undefined)
+
+    return () => controller.abort()
+  }, [
+    apiBase,
+    scanPreviewVisualRequestKey,
+    scanPreviewVisualRequestKind,
+    scanPreviewVisualRequestUrl,
+  ])
 
   useEffect(() => {
     if (!playerItem || !scanPreview?.scanning) {
@@ -361,26 +421,33 @@ function TvApp() {
     playerScanPreloadKeyRef.current = preloadKey
     const nextPreloadImages = new Map<string, HTMLImageElement>()
 
-    for (const url of getScanPreviewPreloadFrameUrls(
+    for (const request of getScanPreviewPreloadVisualRequests(
       playerItem,
       scanPreview,
       apiBase,
       playerClock.duration,
     )) {
-      const existingImage = playerScanPreloadImagesRef.current.get(url)
+      const cachedVisual = playerScanVisualCacheRef.current.get(request.key)
 
-      if (existingImage) {
-        nextPreloadImages.set(url, existingImage)
+      if (cachedVisual) {
+        const imageUrl = getScanPreviewVisualImageUrl(cachedVisual)
+        const existingImage = playerScanPreloadImagesRef.current.get(imageUrl)
+
+        if (existingImage) {
+          nextPreloadImages.set(imageUrl, existingImage)
+        }
+
         continue
       }
 
-      const image = new Image()
-      image.decoding = 'async'
-      image.onload = () => {
-        markScanPreviewFrameReady(image, url)
-      }
-      image.src = url
-      nextPreloadImages.set(url, image)
+      void loadScanPreviewVisual(
+        request,
+        apiBase,
+        undefined,
+        markScanPreviewFrameReady,
+      ).then((visual) => {
+        playerScanVisualCacheRef.current.set(visual.key, visual)
+      }, undefined)
     }
 
     playerScanPreloadImagesRef.current = nextPreloadImages
@@ -1261,7 +1328,8 @@ function TvApp() {
     playerScanLoadedFrameUrlsRef.current.clear()
     playerScanPreloadImagesRef.current.clear()
     playerScanPreloadKeyRef.current = ''
-    setScanPreviewVisibleFrameUrl('')
+    playerScanVisualCacheRef.current.clear()
+    setScanPreviewVisibleVisual(null)
   }
 
   function markScanPreviewFrameReady(
@@ -1697,14 +1765,19 @@ function TvApp() {
           {scanPreview ? (
             <>
               <div className="tv-scan-thumbnail">
-                {scanPreviewVisibleFrameUrl ? (
+                {scanPreviewVisibleVisual?.kind === 'image' ? (
                   <img
                     alt=""
                     className="tv-scan-thumbnail-image"
                     decoding="async"
                     draggable={false}
                     loading="eager"
-                    src={scanPreviewVisibleFrameUrl}
+                    src={scanPreviewVisibleVisual.url}
+                  />
+                ) : scanPreviewVisibleVisual?.kind === 'sprite' ? (
+                  <div
+                    className="tv-scan-thumbnail-image tv-scan-thumbnail-sprite"
+                    style={getScanPreviewSpriteStyle(scanPreviewVisibleVisual)}
                   />
                 ) : null}
                 <span>{formatDuration(scanPreview.position)}</span>
@@ -2363,11 +2436,11 @@ function resolveMediaUrl(streamUrl: string, apiBase: string) {
   return buildApiUrl(streamUrl, apiBase)
 }
 
-function getScanPreviewFrameUrl(
+function getScanPreviewVisualRequest(
   item: MediaItem,
   preview: ScanPreview,
   apiBase: string,
-) {
+) : ScanPreviewVisualRequest {
   const quality = preview.scanning ? 'low' : 'high'
   const bucketSeconds = getScanPreviewFrameBucketSeconds(preview)
   const framePosition = getScanPreviewFramePosition(
@@ -2375,7 +2448,23 @@ function getScanPreviewFrameUrl(
     bucketSeconds,
   )
 
-  return getPreviewFrameUrl(item, apiBase, quality, framePosition)
+  if (!preview.scanning) {
+    const url = getPreviewFrameUrl(item, apiBase, quality, framePosition)
+
+    return {
+      key: `image:${url}`,
+      kind: 'image',
+      url,
+    }
+  }
+
+  const url = getPreviewSpriteUrl(item, apiBase, framePosition)
+
+  return {
+    key: `sprite:${url}`,
+    kind: 'sprite',
+    url,
+  }
 }
 
 function getPreviewFrameUrl(
@@ -2395,7 +2484,23 @@ function getPreviewFrameUrl(
   )
 }
 
-function getScanPreviewPreloadFrameUrls(
+function getPreviewSpriteUrl(
+  item: MediaItem,
+  apiBase: string,
+  framePosition: number,
+) {
+  const params = new URLSearchParams({
+    quality: 'low',
+    t: String(Math.max(framePosition, 0)),
+  })
+
+  return resolveMediaUrl(
+    `/api/media/${encodeURIComponent(item.id)}/preview-sprite?${params}`,
+    apiBase,
+  )
+}
+
+function getScanPreviewPreloadVisualRequests(
   item: MediaItem,
   preview: ScanPreview,
   apiBase: string,
@@ -2410,7 +2515,8 @@ function getScanPreviewPreloadFrameUrls(
     preview.position,
     bucketSeconds,
   )
-  const frameUrls: string[] = []
+  const requests: ScanPreviewVisualRequest[] = []
+  const requestKeys = new Set<string>()
 
   const preloadFrameCount = getScanPreviewPreloadFrameCount(preview)
 
@@ -2425,10 +2531,123 @@ function getScanPreviewPreloadFrameUrls(
       continue
     }
 
-    frameUrls.push(getPreviewFrameUrl(item, apiBase, 'low', preloadPosition))
+    const request: ScanPreviewVisualRequest = {
+      key: `sprite:${getPreviewSpriteUrl(item, apiBase, preloadPosition)}`,
+      kind: 'sprite',
+      url: getPreviewSpriteUrl(item, apiBase, preloadPosition),
+    }
+
+    if (!requestKeys.has(request.key)) {
+      requests.push(request)
+      requestKeys.add(request.key)
+    }
   }
 
-  return frameUrls
+  return requests
+}
+
+async function loadScanPreviewVisual(
+  request: ScanPreviewVisualRequest,
+  apiBase: string,
+  signal: AbortSignal | undefined,
+  markReady: (
+    image: HTMLImageElement,
+    url: string,
+    onReady?: () => void,
+  ) => void,
+): Promise<ScanPreviewVisual> {
+  if (request.kind === 'image') {
+    await loadScanPreviewImage(request.url, markReady)
+
+    return {
+      key: request.key,
+      kind: 'image',
+      url: request.url,
+    }
+  }
+
+  const response = await fetch(request.url, {
+    cache: 'no-store',
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Preview sprite failed (${response.status})`)
+  }
+
+  const sprite = normalizePreviewSprite(await response.json())
+  const sheetUrl = resolveMediaUrl(sprite.sheetUrl, apiBase)
+
+  await loadScanPreviewImage(sheetUrl, markReady)
+
+  return {
+    column: sprite.column,
+    columns: sprite.columns,
+    key: request.key,
+    kind: 'sprite',
+    row: sprite.row,
+    rows: sprite.rows,
+    sheetUrl,
+  }
+}
+
+function loadScanPreviewImage(
+  url: string,
+  markReady: (
+    image: HTMLImageElement,
+    url: string,
+    onReady?: () => void,
+  ) => void,
+) {
+  return new Promise<void>((resolvePromise, rejectPromise) => {
+    const image = new Image()
+
+    image.decoding = 'async'
+    image.onload = () => {
+      markReady(image, url, resolvePromise)
+    }
+    image.onerror = () => rejectPromise(new Error('Preview image failed'))
+    image.src = url
+  })
+}
+
+function normalizePreviewSprite(value: unknown): PreviewSpriteResponse {
+  if (!isRecord(value)) {
+    throw new Error('Invalid preview sprite')
+  }
+
+  return {
+    column: Number(value.column),
+    columns: Number(value.columns),
+    row: Number(value.row),
+    rows: Number(value.rows),
+    sheetUrl: typeof value.sheetUrl === 'string' ? value.sheetUrl : '',
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function getScanPreviewVisualImageUrl(visual: ScanPreviewVisual) {
+  return visual.kind === 'image' ? visual.url : visual.sheetUrl
+}
+
+function getScanPreviewSpriteStyle(
+  visual: Extract<ScanPreviewVisual, { kind: 'sprite' }>,
+) {
+  const xPercent =
+    visual.columns <= 1 ? 0 : (visual.column / (visual.columns - 1)) * 100
+  const yPercent =
+    visual.rows <= 1 ? 0 : (visual.row / (visual.rows - 1)) * 100
+
+  return {
+    '--scan-sprite-background-size': `${visual.columns * 100}% ${
+      visual.rows * 100
+    }%`,
+    backgroundImage: `url("${visual.sheetUrl}")`,
+    backgroundPosition: `${xPercent}% ${yPercent}%`,
+  } as CSSProperties
 }
 
 function getScanPreviewFramePosition(position: number, bucketSeconds: number) {

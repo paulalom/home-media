@@ -148,6 +148,34 @@ type PreviewFrameGenerationOptions = {
   threads?: number
 }
 
+type PreviewSpriteSheetInfo = {
+  sheetIndex: number
+  sheetPath: string
+  startFrameIndex: number
+  startTime: number
+  versionKey: string
+}
+
+type PreviewSpriteFrameInfo = PreviewSpriteSheetInfo & {
+  column: number
+  frameIndex: number
+  frameTime: number
+  row: number
+}
+
+type PreviewSprite = {
+  column: number
+  columns: number
+  frameIndex: number
+  frameWidth: number
+  quality: PreviewFrameQuality
+  row: number
+  rows: number
+  sheetIndex: number
+  sheetUrl: string
+  time: number
+}
+
 type TmdbCredentials =
   | {
       apiKey: string
@@ -201,9 +229,9 @@ const ARTWORK_FETCH_TIMEOUT_MS = 10_000
 const ARTWORK_MISSING_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ARTWORK_BYTES = 8 * 1024 * 1024
 const PREVIEW_FRAME_TIMEOUT_MS = 8_000
-const PREVIEW_FRAME_BATCH_MAX_TIMEOUT_MS = 10 * 60_000
-const PREVIEW_FRAME_BATCH_TIMEOUT_MS_PER_FRAME = 1_000
 const PREVIEW_FRAME_PROBE_TIMEOUT_MS = 8_000
+const PREVIEW_SPRITE_SHEET_MAX_TIMEOUT_MS = 10 * 60_000
+const PREVIEW_SPRITE_SHEET_TIMEOUT_MS_PER_FRAME = 1_000
 const MAX_PREVIEW_FRAME_BYTES = 3 * 1024 * 1024
 const PREVIEW_FRAME_SETTINGS = {
   high: {
@@ -221,11 +249,13 @@ const PREVIEW_FRAME_SETTINGS = {
 } as const
 const PREVIEW_CACHE_FRAME_INTERVAL_SECONDS = 5
 const PREVIEW_CACHE_QUALITY: PreviewFrameQuality = 'low'
-const PREVIEW_CACHE_BACKGROUND_BATCH_FRAME_COUNT = 60
 const PREVIEW_CACHE_BACKGROUND_CPU_BUDGET = 0.25
 const PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS = 1
-const PREVIEW_CACHE_FOREGROUND_BATCH_FRAME_COUNT = Number.POSITIVE_INFINITY
 const PREVIEW_CACHE_FOREGROUND_CPU_BUDGET = 1
+const PREVIEW_SPRITE_COLUMNS = 10
+const PREVIEW_SPRITE_ROWS = 6
+const PREVIEW_SPRITE_FRAMES_PER_SHEET =
+  PREVIEW_SPRITE_COLUMNS * PREVIEW_SPRITE_ROWS
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -358,7 +388,7 @@ export async function handleMediaApi(
     url.pathname === '/api/playback' ||
     url.pathname === '/api/preview-cache' ||
     /^\/api\/playback\/[^/]+$/.test(url.pathname) ||
-    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|stream)$/.test(
+    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|preview-sheet|preview-sprite|stream)$/.test(
       url.pathname,
     )
 
@@ -537,6 +567,53 @@ export async function handleMediaApi(
     return true
   }
 
+  const previewSpriteMatch = /^\/api\/media\/([^/]+)\/preview-sprite$/.exec(
+    url.pathname,
+  )
+
+  if (previewSpriteMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      sendMethodNotAllowed(res, ['GET', 'HEAD'])
+      return true
+    }
+
+    try {
+      const previewSprite = await resolvePreviewSpriteForRequest(
+        previewSpriteMatch[1],
+        url.searchParams,
+      )
+
+      if (req.method === 'HEAD') {
+        sendNoContent(res)
+      } else {
+        sendJson(res, previewSprite)
+      }
+    } catch (error) {
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+    }
+
+    return true
+  }
+
+  const previewSheetMatch = /^\/api\/media\/([^/]+)\/preview-sheet$/.exec(
+    url.pathname,
+  )
+
+  if (previewSheetMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      sendMethodNotAllowed(res, ['GET', 'HEAD'])
+      return true
+    }
+
+    try {
+      await streamPreviewSheet(previewSheetMatch[1], req, res, url.searchParams)
+    } catch (error) {
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+    }
+
+    return true
+  }
+
   return false
 }
 
@@ -684,6 +761,7 @@ async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
 
     const frameTimes = getPreviewCacheFrameTimes(duration)
     const missingFrameTimes: number[] = []
+    const generatedSheetIndexes = new Set<number>()
 
     previewCacheStatus = {
       ...previewCacheStatus,
@@ -696,14 +774,15 @@ async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
         return
       }
 
-      const framePath = getPreviewFramePath(
+      const sheetInfo = getPreviewSpriteSheetInfo(
         item.id,
+        mediaPath,
         stats,
         frameTime,
         PREVIEW_CACHE_QUALITY,
       )
 
-      if (await isFile(framePath)) {
+      if (await isFile(sheetInfo.sheetPath)) {
         previewCacheStatus = {
           ...previewCacheStatus,
           cachedFrames: previewCacheStatus.cachedFrames + 1,
@@ -711,6 +790,7 @@ async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
         }
       } else {
         missingFrameTimes.push(frameTime)
+        generatedSheetIndexes.add(sheetInfo.sheetIndex)
       }
     }
 
@@ -720,12 +800,12 @@ async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
       updatedAt: new Date().toISOString(),
     }
 
-    await warmMissingPreviewFrames(
+    await warmMissingPreviewSheets(
       item.id,
       mediaPath,
       stats,
-      frameTimes,
       missingFrameTimes,
+      generatedSheetIndexes,
       runId,
     )
 
@@ -827,200 +907,89 @@ function getPreviewCacheWarmStatusFields(mode: PreviewCacheWarmMode) {
 function getPreviewCacheWarmSettings(mode = previewCacheWarmMode) {
   if (mode === 'foreground') {
     return {
-      batchFrameCount: PREVIEW_CACHE_FOREGROUND_BATCH_FRAME_COUNT,
       cpuBudget: PREVIEW_CACHE_FOREGROUND_CPU_BUDGET,
       ffmpegThreads: undefined,
     }
   }
 
   return {
-    batchFrameCount: PREVIEW_CACHE_BACKGROUND_BATCH_FRAME_COUNT,
     cpuBudget: PREVIEW_CACHE_BACKGROUND_CPU_BUDGET,
     ffmpegThreads: PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS,
   }
 }
 
-async function warmMissingPreviewFrames(
+async function warmMissingPreviewSheets(
   mediaId: string,
   mediaPath: string,
   stats: Stats,
-  frameTimes: number[],
   missingFrameTimes: number[],
+  missingSheetIndexes: Set<number>,
   runId: number,
 ) {
   const settings = getPreviewCacheWarmSettings()
-  const frameIndexByTime = new Map(
-    frameTimes.map((frameTime, index) => [frameTime, index]),
-  )
-  const missingFrameIndexes = missingFrameTimes
-    .map((frameTime) => frameIndexByTime.get(frameTime))
-    .filter((index): index is number => index !== undefined)
-  const chunks = getPreviewCacheBatchChunks(
-    frameTimes,
-    missingFrameIndexes,
-    settings.batchFrameCount,
-  )
+  const missingFrameCountBySheet = new Map<number, number>()
 
-  for (const chunk of chunks) {
+  for (const frameTime of missingFrameTimes) {
+    const sheetInfo = getPreviewSpriteSheetInfo(
+      mediaId,
+      mediaPath,
+      stats,
+      frameTime,
+      PREVIEW_CACHE_QUALITY,
+    )
+
+    missingFrameCountBySheet.set(
+      sheetInfo.sheetIndex,
+      (missingFrameCountBySheet.get(sheetInfo.sheetIndex) ?? 0) + 1,
+    )
+  }
+
+  for (const sheetIndex of [...missingSheetIndexes].sort(
+    (first, second) => first - second,
+  )) {
     if (runId !== previewCacheWarmRunId) {
       return
     }
 
-    const generationStartedAt = Date.now()
+    const frameCount = missingFrameCountBySheet.get(sheetIndex) ?? 0
 
-    try {
-      await trackActivePreviewFrameWarm(
-        generatePreviewFrameBatch(
-          mediaId,
-          mediaPath,
-          stats,
-          frameTimes,
-          chunk,
-          PREVIEW_CACHE_QUALITY,
-          {
-            threads: settings.ffmpegThreads,
-          },
-        ).then(() => undefined),
-      )
-    } catch (error) {
-      await warmPreviewCacheFramesIndividually(
-        mediaId,
-        mediaPath,
-        stats,
-        frameTimes,
-        chunk.missingFrameIndexes,
-        runId,
-        getErrorMessage(error),
-      )
+    if (frameCount <= 0) {
       continue
     }
 
-    const unresolvedFrameIndexes: number[] = []
-
-    for (const frameIndex of chunk.missingFrameIndexes) {
-      if (runId !== previewCacheWarmRunId) {
-        return
-      }
-
-      const framePath = getPreviewFramePath(
-        mediaId,
-        stats,
-        frameTimes[frameIndex],
-        PREVIEW_CACHE_QUALITY,
-      )
-
-      if (await isFile(framePath)) {
-        markPreviewCacheFrameGenerated()
-      } else {
-        unresolvedFrameIndexes.push(frameIndex)
-      }
-    }
-
-    if (unresolvedFrameIndexes.length > 0) {
-      await warmPreviewCacheFramesIndividually(
-        mediaId,
-        mediaPath,
-        stats,
-        frameTimes,
-        unresolvedFrameIndexes,
-        runId,
-        'Batch preview frame extraction missed expected frames',
-      )
-    }
-
-    await throttlePreviewCacheWarm(generationStartedAt, runId)
-  }
-}
-
-function getPreviewCacheBatchChunks(
-  frameTimes: number[],
-  missingFrameIndexes: number[],
-  batchFrameCount: number,
-) {
-  const chunks: {
-    frameTimes: number[]
-    missingFrameIndexes: number[]
-    startIndex: number
-  }[] = []
-  const safeBatchFrameCount = Number.isFinite(batchFrameCount)
-    ? Math.max(Math.floor(batchFrameCount), 1)
-    : frameTimes.length
-  let nextMissingIndex = 0
-
-  while (nextMissingIndex < missingFrameIndexes.length) {
-    const startIndex = missingFrameIndexes[nextMissingIndex]
-    const endIndex = Math.min(
-      startIndex + safeBatchFrameCount - 1,
-      frameTimes.length - 1,
-    )
-    const chunkMissingFrameIndexes: number[] = []
-
-    while (
-      nextMissingIndex < missingFrameIndexes.length &&
-      missingFrameIndexes[nextMissingIndex] <= endIndex
-    ) {
-      chunkMissingFrameIndexes.push(missingFrameIndexes[nextMissingIndex])
-      nextMissingIndex += 1
-    }
-
-    chunks.push({
-      frameTimes: frameTimes.slice(startIndex, endIndex + 1),
-      missingFrameIndexes: chunkMissingFrameIndexes,
-      startIndex,
-    })
-  }
-
-  return chunks
-}
-
-async function warmPreviewCacheFramesIndividually(
-  mediaId: string,
-  mediaPath: string,
-  stats: Stats,
-  frameTimes: number[],
-  frameIndexes: number[],
-  runId: number,
-  fallbackReason?: string,
-) {
-  const settings = getPreviewCacheWarmSettings()
-
-  for (const frameIndex of frameIndexes) {
-    if (runId !== previewCacheWarmRunId) {
-      return
-    }
-
     const generationStartedAt = Date.now()
+    const sheetInfo = getPreviewSpriteSheetInfoForIndex(
+      mediaId,
+      mediaPath,
+      stats,
+      sheetIndex,
+      PREVIEW_CACHE_QUALITY,
+    )
+
+    if (await isFile(sheetInfo.sheetPath)) {
+      markPreviewCacheFramesCached(frameCount)
+      continue
+    }
 
     try {
       await trackActivePreviewFrameWarm(
-        resolvePreviewFrame(
-          mediaId,
-          mediaPath,
-          stats,
-          frameTimes[frameIndex],
-          PREVIEW_CACHE_QUALITY,
-          {
-            threads: settings.ffmpegThreads,
-          },
-        ).then(() => undefined),
+        generatePreviewSpriteSheet(mediaPath, sheetInfo, PREVIEW_CACHE_QUALITY, {
+          threads: settings.ffmpegThreads,
+        }).then(() => undefined),
       )
 
       if (runId !== previewCacheWarmRunId) {
         return
       }
 
-      markPreviewCacheFrameGenerated()
+      markPreviewCacheFramesGenerated(frameCount)
       await throttlePreviewCacheWarm(generationStartedAt, runId)
     } catch (error) {
       if (runId !== previewCacheWarmRunId) {
         return
       }
 
-      const message = fallbackReason
-        ? `${fallbackReason}; ${getErrorMessage(error)}`
-        : getErrorMessage(error)
-
-      markPreviewCacheFrameFailed(message)
+      markPreviewCacheFramesFailed(frameCount, getErrorMessage(error))
     }
   }
 }
@@ -1040,21 +1009,30 @@ async function trackActivePreviewFrameWarm<T>(promise: Promise<T>) {
   }
 }
 
-function markPreviewCacheFrameGenerated() {
+function markPreviewCacheFramesCached(count: number) {
   previewCacheStatus = {
     ...previewCacheStatus,
-    generatedFrames: previewCacheStatus.generatedFrames + 1,
-    pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
+    cachedFrames: previewCacheStatus.cachedFrames + count,
+    pendingFrames: Math.max(previewCacheStatus.pendingFrames - count, 0),
     updatedAt: new Date().toISOString(),
   }
 }
 
-function markPreviewCacheFrameFailed(message: string) {
+function markPreviewCacheFramesGenerated(count: number) {
   previewCacheStatus = {
     ...previewCacheStatus,
-    failedFrames: previewCacheStatus.failedFrames + 1,
+    generatedFrames: previewCacheStatus.generatedFrames + count,
+    pendingFrames: Math.max(previewCacheStatus.pendingFrames - count, 0),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function markPreviewCacheFramesFailed(count: number, message: string) {
+  previewCacheStatus = {
+    ...previewCacheStatus,
+    failedFrames: previewCacheStatus.failedFrames + count,
     lastError: message,
-    pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
+    pendingFrames: Math.max(previewCacheStatus.pendingFrames - count, 0),
     updatedAt: new Date().toISOString(),
   }
 }
@@ -1336,6 +1314,154 @@ async function streamPreviewFrame(
   createReadStream(framePath).pipe(res)
 }
 
+async function resolvePreviewSpriteForRequest(
+  mediaId: string,
+  searchParams: URLSearchParams,
+): Promise<PreviewSprite> {
+  const previewMedia = await getPreviewMedia(mediaId)
+  const quality = getPreviewFrameQuality(searchParams.get('quality'))
+  const frameTime = getPreviewFrameTime(searchParams.get('t'), quality)
+
+  return resolvePreviewSprite(
+    mediaId,
+    previewMedia.mediaPath,
+    previewMedia.stats,
+    frameTime,
+    quality,
+  )
+}
+
+async function streamPreviewSheet(
+  mediaId: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+  searchParams: URLSearchParams,
+) {
+  const previewMedia = await getPreviewMedia(mediaId)
+  const quality = getPreviewFrameQuality(searchParams.get('quality'))
+  const rawSheetIndex = Number(searchParams.get('sheet') ?? 0)
+  const sheetIndex =
+    Number.isInteger(rawSheetIndex) && rawSheetIndex > 0 ? rawSheetIndex : 0
+  const sheetInfo = getPreviewSpriteSheetInfoForIndex(
+    mediaId,
+    previewMedia.mediaPath,
+    previewMedia.stats,
+    sheetIndex,
+    quality,
+  )
+  const sheetPath = await resolvePreviewSpriteSheet(
+    previewMedia.mediaPath,
+    sheetInfo,
+    quality,
+  )
+  const sheetStats = await fs.stat(sheetPath)
+
+  res.writeHead(200, {
+    ...API_CORS_HEADERS,
+    'Cache-Control': 'public, max-age=604800, immutable',
+    'Content-Length': sheetStats.size,
+    'Content-Type': 'image/jpeg',
+    'Last-Modified': sheetStats.mtime.toUTCString(),
+  })
+
+  if (req.method === 'HEAD') {
+    res.end()
+    return
+  }
+
+  createReadStream(sheetPath).pipe(res)
+}
+
+async function getPreviewMedia(mediaId: string) {
+  const mediaPath = getMediaPath(mediaId)
+
+  if (!mediaPath) {
+    throw createHttpError(404, 'Media not found')
+  }
+
+  const extension = extname(mediaPath).toLowerCase()
+
+  if (!VIDEO_EXTENSIONS.has(extension)) {
+    throw createHttpError(415, 'Unsupported media type')
+  }
+
+  let stats: Stats
+
+  try {
+    stats = await fs.stat(mediaPath)
+  } catch {
+    throw createHttpError(404, 'Media not found')
+  }
+
+  if (!stats.isFile()) {
+    throw createHttpError(404, 'Media not found')
+  }
+
+  return {
+    mediaPath,
+    stats,
+  }
+}
+
+async function resolvePreviewSprite(
+  mediaId: string,
+  mediaPath: string,
+  stats: Stats,
+  frameTime: number,
+  quality: PreviewFrameQuality,
+): Promise<PreviewSprite> {
+  const sheetInfo = getPreviewSpriteSheetInfo(
+    mediaId,
+    mediaPath,
+    stats,
+    frameTime,
+    quality,
+  )
+
+  await resolvePreviewSpriteSheet(mediaPath, sheetInfo, quality)
+
+  return {
+    column: sheetInfo.column,
+    columns: PREVIEW_SPRITE_COLUMNS,
+    frameIndex: sheetInfo.frameIndex,
+    frameWidth: PREVIEW_FRAME_SETTINGS[quality].width,
+    quality,
+    row: sheetInfo.row,
+    rows: PREVIEW_SPRITE_ROWS,
+    sheetIndex: sheetInfo.sheetIndex,
+    sheetUrl: getPreviewSpriteSheetUrl(mediaId, sheetInfo.sheetIndex, quality),
+    time: sheetInfo.frameTime,
+  }
+}
+
+async function resolvePreviewSpriteSheet(
+  mediaPath: string,
+  sheetInfo: ReturnType<typeof getPreviewSpriteSheetInfoForIndex>,
+  quality: PreviewFrameQuality,
+) {
+  if (await isFile(sheetInfo.sheetPath)) {
+    return sheetInfo.sheetPath
+  }
+
+  const existingFetch = previewFrameFetches.get(sheetInfo.sheetPath)
+
+  if (existingFetch) {
+    return existingFetch
+  }
+
+  const fetchPromise = generatePreviewSpriteSheet(mediaPath, sheetInfo, quality)
+
+  previewFrameFetches.set(sheetInfo.sheetPath, fetchPromise)
+
+  try {
+    return await fetchPromise
+  } finally {
+    if (previewFrameFetches.get(sheetInfo.sheetPath) === fetchPromise) {
+      previewFrameFetches.delete(sheetInfo.sheetPath)
+    }
+  }
+}
+
 async function resolvePreviewFrame(
   mediaId: string,
   mediaPath: string,
@@ -1344,7 +1470,13 @@ async function resolvePreviewFrame(
   quality: PreviewFrameQuality,
   options: PreviewFrameGenerationOptions = {},
 ) {
-  const framePath = getPreviewFramePath(mediaId, stats, frameTime, quality)
+  const framePath = getPreviewFramePath(
+    mediaId,
+    mediaPath,
+    stats,
+    frameTime,
+    quality,
+  )
 
   if (await isFile(framePath)) {
     return framePath
@@ -1375,50 +1507,30 @@ async function resolvePreviewFrame(
   }
 }
 
-async function generatePreviewFrameBatch(
-  mediaId: string,
+async function generatePreviewSpriteSheet(
   mediaPath: string,
-  stats: Stats,
-  frameTimes: number[],
-  chunk: {
-    frameTimes: number[]
-    startIndex: number
-  },
+  sheetInfo: ReturnType<typeof getPreviewSpriteSheetInfoForIndex>,
   quality: PreviewFrameQuality,
   options: PreviewFrameGenerationOptions = {},
 ) {
-  const tempDirectory = await createPreviewFrameBatchTempDirectory()
+  const tempPath = `${sheetInfo.sheetPath}.${Date.now()}.tmp.jpg`
 
   try {
-    await extractPreviewFrameBatch(
+    await fs.mkdir(dirname(sheetInfo.sheetPath), { recursive: true })
+    await extractPreviewSpriteSheet(
       mediaPath,
-      chunk.frameTimes[0],
-      chunk.frameTimes.length,
-      tempDirectory,
+      sheetInfo.startTime,
+      tempPath,
       PREVIEW_FRAME_SETTINGS[quality],
       options,
     )
-
-    for (let offset = 0; offset < chunk.frameTimes.length; offset += 1) {
-      const tempPath = getPreviewFrameBatchTempPath(tempDirectory, offset)
-
-      if (!(await isFile(tempPath))) {
-        continue
-      }
-
-      const frameIndex = chunk.startIndex + offset
-      const framePath = getPreviewFramePath(
-        mediaId,
-        stats,
-        frameTimes[frameIndex],
-        quality,
-      )
-
-      await movePreviewFrameIntoCache(tempPath, framePath)
-    }
-  } finally {
-    await fs.rm(tempDirectory, { force: true, recursive: true })
+    await movePreviewFrameIntoCache(tempPath, sheetInfo.sheetPath)
+  } catch (error) {
+    await fs.rm(tempPath, { force: true })
+    throw error
   }
+
+  return sheetInfo.sheetPath
 }
 
 async function generatePreviewFrame(
@@ -1442,14 +1554,6 @@ async function generatePreviewFrame(
   await fs.rename(tempPath, framePath)
 
   return framePath
-}
-
-async function createPreviewFrameBatchTempDirectory() {
-  const cacheRoot = getPreviewFrameCacheRoot()
-
-  await fs.mkdir(cacheRoot, { recursive: true })
-
-  return fs.mkdtemp(join(cacheRoot, 'batch-'))
 }
 
 async function movePreviewFrameIntoCache(tempPath: string, framePath: string) {
@@ -1581,11 +1685,10 @@ function extractPreviewFrame(
   })
 }
 
-function extractPreviewFrameBatch(
+function extractPreviewSpriteSheet(
   mediaPath: string,
   startTime: number,
-  frameCount: number,
-  outputDirectory: string,
+  outputPath: string,
   settings: (typeof PREVIEW_FRAME_SETTINGS)[PreviewFrameQuality],
   options: PreviewFrameGenerationOptions = {},
 ) {
@@ -1611,17 +1714,15 @@ function extractPreviewFrameBatch(
         '-sn',
         '-dn',
         '-vf',
-        `fps=1/${PREVIEW_CACHE_FRAME_INTERVAL_SECONDS},scale=${settings.width}:-2`,
+        `fps=1/${PREVIEW_CACHE_FRAME_INTERVAL_SECONDS},scale=${settings.width}:-2,tile=${PREVIEW_SPRITE_COLUMNS}x${PREVIEW_SPRITE_ROWS}`,
         '-frames:v',
-        String(frameCount),
+        '1',
         '-q:v',
         String(settings.jpegQuality),
         ...threadArgs,
-        '-start_number',
-        '0',
         '-f',
         'image2',
-        join(outputDirectory, '%06d.jpg'),
+        outputPath,
       ],
       {
         windowsHide: true,
@@ -1630,9 +1731,9 @@ function extractPreviewFrameBatch(
     const errorChunks: Buffer[] = []
     let settled = false
     const timeout = setTimeout(() => {
-      finish(new Error('Preview frame batch generation timed out'))
+      finish(new Error('Preview sprite sheet generation timed out'))
       ffmpeg.kill()
-    }, getPreviewFrameBatchTimeout(frameCount))
+    }, getPreviewSpriteSheetTimeout())
 
     function finish(error?: Error) {
       if (settled) {
@@ -1670,23 +1771,21 @@ function extractPreviewFrameBatch(
 
       const stderr = Buffer.concat(errorChunks).toString('utf8').trim()
       const message = stderr
-        ? `Preview frame batch generation failed: ${stderr}`
-        : `Preview frame batch generation failed (${code ?? 'unknown exit'})`
+        ? `Preview sprite sheet generation failed: ${stderr}`
+        : `Preview sprite sheet generation failed (${code ?? 'unknown exit'})`
 
       finish(new Error(message))
     })
   })
 }
 
-function getPreviewFrameBatchTimeout(frameCount: number) {
+function getPreviewSpriteSheetTimeout() {
   return Math.min(
-    PREVIEW_FRAME_BATCH_MAX_TIMEOUT_MS,
-    PREVIEW_FRAME_TIMEOUT_MS + frameCount * PREVIEW_FRAME_BATCH_TIMEOUT_MS_PER_FRAME,
+    PREVIEW_SPRITE_SHEET_MAX_TIMEOUT_MS,
+    PREVIEW_FRAME_TIMEOUT_MS +
+      PREVIEW_SPRITE_FRAMES_PER_SHEET *
+        PREVIEW_SPRITE_SHEET_TIMEOUT_MS_PER_FRAME,
   )
-}
-
-function getPreviewFrameBatchTempPath(directory: string, frameIndex: number) {
-  return join(directory, `${String(frameIndex).padStart(6, '0')}.jpg`)
 }
 
 function getPreviewFrameQuality(value: string | null): PreviewFrameQuality {
@@ -1800,15 +1899,159 @@ function createPreviewFrameCacheKey(
     .digest('hex')
 }
 
+function getPreviewSpriteSheetInfo(
+  mediaId: string,
+  mediaPath: string,
+  stats: Stats,
+  frameTime: number,
+  quality: PreviewFrameQuality,
+): PreviewSpriteFrameInfo {
+  const intervalSeconds = PREVIEW_FRAME_SETTINGS[quality].timeBucketSeconds
+  const frameIndex = Math.max(Math.round(frameTime / intervalSeconds), 0)
+  const sheetInfo = getPreviewSpriteSheetInfoForIndex(
+    mediaId,
+    mediaPath,
+    stats,
+    Math.floor(frameIndex / PREVIEW_SPRITE_FRAMES_PER_SHEET),
+    quality,
+  )
+  const cellIndex = frameIndex % PREVIEW_SPRITE_FRAMES_PER_SHEET
+
+  return {
+    ...sheetInfo,
+    column: cellIndex % PREVIEW_SPRITE_COLUMNS,
+    frameIndex,
+    frameTime: frameIndex * intervalSeconds,
+    row: Math.floor(cellIndex / PREVIEW_SPRITE_COLUMNS),
+  }
+}
+
+function getPreviewSpriteSheetInfoForIndex(
+  mediaId: string,
+  mediaPath: string,
+  stats: Stats,
+  sheetIndex: number,
+  quality: PreviewFrameQuality,
+): PreviewSpriteSheetInfo {
+  const safeSheetIndex = Math.max(Math.floor(sheetIndex), 0)
+  const startFrameIndex = safeSheetIndex * PREVIEW_SPRITE_FRAMES_PER_SHEET
+  const startTime =
+    startFrameIndex * PREVIEW_FRAME_SETTINGS[quality].timeBucketSeconds
+  const versionKey = createPreviewMediaVersionKey(mediaId, stats)
+
+  return {
+    sheetIndex: safeSheetIndex,
+    sheetPath: join(
+      getPreviewSpriteCacheDirectory(mediaId, mediaPath, quality),
+      `sheet-${String(safeSheetIndex).padStart(4, '0')}-${versionKey}.jpg`,
+    ),
+    startFrameIndex,
+    startTime,
+    versionKey,
+  }
+}
+
+function createPreviewMediaVersionKey(mediaId: string, stats: Stats) {
+  return createHash('sha256')
+    .update([mediaId, String(stats.size), String(Math.floor(stats.mtimeMs))].join('\n'))
+    .digest('hex')
+    .slice(0, 12)
+}
+
+function getPreviewSpriteCacheDirectory(
+  mediaId: string,
+  mediaPath: string,
+  quality: PreviewFrameQuality,
+) {
+  const relativePath = decodeMediaId(mediaId) ?? basename(mediaPath)
+  const filename = basename(mediaPath)
+  const extension = extname(mediaPath)
+  const metadata = getMediaMetadata(relativePath, filename, extension)
+  const sourceName = getSourceName(relativePath)
+  const filenameTitle = cleanTitle(basename(filename, extension))
+
+  if (metadata.category === 'show') {
+    const seasonLabel = metadata.seasonNumber
+      ? `Season ${String(metadata.seasonNumber).padStart(2, '0')}`
+      : 'Season Unknown'
+    const episodeCode =
+      metadata.seasonNumber && metadata.episodeNumber
+        ? `S${String(metadata.seasonNumber).padStart(2, '0')}E${String(
+            metadata.episodeNumber,
+          ).padStart(2, '0')}`
+        : ''
+    const episodeTitle =
+      episodeCode && metadata.title === `Episode ${metadata.episodeNumber}`
+        ? episodeCode
+        : cleanTitle(`${episodeCode} ${metadata.title}`.trim()) || filenameTitle
+
+    return join(
+      getPreviewFrameCacheRoot(),
+      'TV Shows',
+      sanitizePreviewCacheSegment(metadata.showTitle ?? sourceName),
+      sanitizePreviewCacheSegment(seasonLabel),
+      sanitizePreviewCacheSegment(episodeTitle),
+      quality,
+    )
+  }
+
+  if (metadata.category === 'movie') {
+    return join(
+      getPreviewFrameCacheRoot(),
+      'Movies',
+      sanitizePreviewCacheSegment(metadata.title),
+      sanitizePreviewCacheSegment(filenameTitle),
+      quality,
+    )
+  }
+
+  return join(
+    getPreviewFrameCacheRoot(),
+    'Other',
+    sanitizePreviewCacheSegment(sourceName),
+    sanitizePreviewCacheSegment(filenameTitle),
+    quality,
+  )
+}
+
+function getPreviewSpriteSheetUrl(
+  mediaId: string,
+  sheetIndex: number,
+  quality: PreviewFrameQuality,
+) {
+  const params = new URLSearchParams({
+    quality,
+    sheet: String(sheetIndex),
+  })
+
+  return `/api/media/${encodeURIComponent(mediaId)}/preview-sheet?${params}`
+}
+
+function sanitizePreviewCacheSegment(value: string) {
+  const sanitizedValue = cleanTitle(value)
+    .replace(/[<>:"/\\|?*]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/g, '')
+
+  return sanitizedValue || 'Untitled'
+}
+
 function getPreviewFramePath(
   mediaId: string,
+  mediaPath: string,
   stats: Stats,
   frameTime: number,
   quality: PreviewFrameQuality,
 ) {
   return join(
-    getPreviewFrameCacheRoot(),
-    `${createPreviewFrameCacheKey(mediaId, stats, frameTime, quality)}.jpg`,
+    getPreviewSpriteCacheDirectory(mediaId, mediaPath, quality),
+    `frame-${formatFfmpegTime(frameTime)}-${createPreviewFrameCacheKey(
+      mediaId,
+      stats,
+      frameTime,
+      quality,
+    ).slice(0, 12)}.jpg`,
   )
 }
 

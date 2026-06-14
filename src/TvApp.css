@@ -791,6 +791,11 @@ button {
   width: 100%;
 }
 
+.tv-scan-thumbnail-sprite {
+  background-repeat: no-repeat;
+  background-size: var(--scan-sprite-background-size);
+}
+
 .tv-scan-thumbnail span {
   background: rgb(5 6 7 / 82%);
   border-radius: 6px;
