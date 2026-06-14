@@ -249,8 +249,9 @@ const PREVIEW_FRAME_SETTINGS = {
 } as const
 const PREVIEW_CACHE_FRAME_INTERVAL_SECONDS = 5
 const PREVIEW_CACHE_QUALITY: PreviewFrameQuality = 'low'
+const PREVIEW_CACHE_BACKGROUND_COOLDOWN_MS = 2_000
 const PREVIEW_CACHE_BACKGROUND_CPU_BUDGET = 0.25
-const PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS = 1
+const PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS = 4
 const PREVIEW_CACHE_FOREGROUND_CPU_BUDGET = 1
 const PREVIEW_SPRITE_COLUMNS = 10
 const PREVIEW_SPRITE_ROWS = 6
@@ -957,7 +958,6 @@ async function warmMissingPreviewSheets(
       continue
     }
 
-    const generationStartedAt = Date.now()
     const sheetInfo = getPreviewSpriteSheetInfoForIndex(
       mediaId,
       mediaPath,
@@ -983,7 +983,7 @@ async function warmMissingPreviewSheets(
       }
 
       markPreviewCacheFramesGenerated(frameCount)
-      await throttlePreviewCacheWarm(generationStartedAt, runId)
+      await throttlePreviewCacheWarm(runId)
     } catch (error) {
       if (runId !== previewCacheWarmRunId) {
         return
@@ -1037,7 +1037,7 @@ function markPreviewCacheFramesFailed(count: number, message: string) {
   }
 }
 
-async function throttlePreviewCacheWarm(startedAt: number, runId: number) {
+async function throttlePreviewCacheWarm(runId: number) {
   const settings = getPreviewCacheWarmSettings()
 
   if (
@@ -1047,12 +1047,7 @@ async function throttlePreviewCacheWarm(startedAt: number, runId: number) {
     return
   }
 
-  const elapsedMs = Date.now() - startedAt
-  const delayMs = Math.ceil(elapsedMs * (1 / settings.cpuBudget - 1))
-
-  if (delayMs > 0) {
-    await sleep(delayMs)
-  }
+  await sleep(PREVIEW_CACHE_BACKGROUND_COOLDOWN_MS)
 }
 
 function getPreviewCacheFrameTimes(duration: number) {
