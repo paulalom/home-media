@@ -166,14 +166,16 @@ const PREVIEW_FRAME_TIMEOUT_MS = 8_000
 const MAX_PREVIEW_FRAME_BYTES = 3 * 1024 * 1024
 const PREVIEW_FRAME_SETTINGS = {
   high: {
+    fastSeek: false,
     jpegQuality: 4,
     timeBucketSeconds: 1,
     width: 960,
   },
   low: {
-    jpegQuality: 8,
-    timeBucketSeconds: 8,
-    width: 320,
+    fastSeek: true,
+    jpegQuality: 12,
+    timeBucketSeconds: 30,
+    width: 240,
   },
 } as const
 
@@ -723,6 +725,7 @@ function extractPreviewFrame(
         'error',
         '-ss',
         formatFfmpegTime(frameTime),
+        ...(settings.fastSeek ? ['-noaccurate_seek'] : []),
         '-i',
         mediaPath,
         '-frames:v',

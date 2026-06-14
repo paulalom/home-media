@@ -660,12 +660,12 @@ button {
   bottom: 42px;
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(420px, 660px) minmax(0, 1fr);
+  grid-template-columns: 520px minmax(0, 1fr);
   left: 50%;
   max-width: calc(100vw - 64px);
   padding: 12px;
   transform: translateX(-50%);
-  width: min(1180px, calc(100vw - 64px));
+  width: min(980px, calc(100vw - 64px));
 }
 
 .tv-player-info.hidden {
@@ -696,31 +696,19 @@ button {
 
 .tv-scan-thumbnail {
   background: #000000;
-  background-position: center;
-  background-size: cover;
   border: 1px solid rgb(247 244 237 / 18%);
   border-radius: 8px;
-  height: 371px;
-  max-height: 31.5vw;
-  max-width: 56vw;
+  height: 293px;
   overflow: hidden;
   position: relative;
-  width: 660px;
+  width: 520px;
 }
 
-.tv-scan-thumbnail-image,
-.tv-scan-thumbnail-video {
+.tv-scan-thumbnail-image {
   display: block;
   height: 100%;
-  inset: 0;
   object-fit: cover;
-  position: absolute;
   width: 100%;
-}
-
-.tv-scan-thumbnail-image.loading-probe {
-  opacity: 0;
-  pointer-events: none;
 }
 
 .tv-scan-thumbnail span {
@@ -733,7 +721,6 @@ button {
   padding: 4px 7px;
   position: absolute;
   right: 8px;
-  z-index: 1;
 }
 
 .tv-scan-details {
@@ -822,15 +809,13 @@ button {
   }
 
   .tv-player-info.scanning {
-    grid-template-columns: minmax(340px, 52vw) minmax(0, 1fr);
+    grid-template-columns: 420px minmax(0, 1fr);
     width: calc(100vw - 48px);
   }
 
   .tv-scan-thumbnail {
-    height: 293px;
-    max-height: 29.25vw;
-    max-width: 52vw;
-    width: 520px;
+    height: 236px;
+    width: 420px;
   }
 }
 
@@ -841,9 +826,8 @@ button {
   }
 
   .tv-scan-thumbnail {
-    height: 56.25vw;
-    max-height: none;
-    max-width: 100%;
+    aspect-ratio: 16 / 9;
+    height: auto;
     width: 100%;
   }
 }
