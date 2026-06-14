@@ -891,20 +891,31 @@ function TvApp() {
     clearScanHoldTimeout()
 
     const currentPreview = playerScanPreviewRef.current
-    const nextSpeedIndex =
-      currentPreview && advanceStage
-        ? getNextScanSpeedIndex(currentPreview, direction)
-        : currentPreview?.speedIndex ?? 0
-    const nextPreview = {
-      direction,
-      position: clamp(currentPreview?.position ?? player.currentTime, 0, duration),
-      scanning: true,
-      speedIndex: nextSpeedIndex,
-    }
+    const clampedPreview = currentPreview
+      ? {
+          ...currentPreview,
+          position: clamp(currentPreview.position, 0, duration),
+        }
+      : null
+    const nextPreview =
+      clampedPreview && advanceStage
+        ? getSteppedScanPreview(clampedPreview, direction)
+        : {
+            direction,
+            position: clampedPreview?.position ?? player.currentTime,
+            scanning: true,
+            speedIndex: clampedPreview?.speedIndex ?? 0,
+          }
 
     setScanPreviewState(nextPreview)
-    playerScanLastTickRef.current = window.performance.now()
-    startScanPreviewTicker()
+
+    if (nextPreview.scanning) {
+      playerScanLastTickRef.current = window.performance.now()
+      startScanPreviewTicker()
+    } else {
+      stopScanPreviewTicker()
+    }
+
     showPlayerHud()
   }
 
@@ -2115,20 +2126,51 @@ function formatPlayerClock(clock: PlayerClock) {
 }
 
 function formatScanPreviewMode(preview: ScanPreview) {
+  if (!preview.scanning) {
+    return 'Preview paused'
+  }
+
   const directionLabel = preview.direction > 0 ? 'FF' : 'REW'
 
   return `${directionLabel} ${scanSpeedMultipliers[preview.speedIndex]}x`
 }
 
-function getNextScanSpeedIndex(
+function getSteppedScanPreview(
   preview: ScanPreview,
   direction: ScanDirection,
 ) {
-  if (preview.direction !== direction) {
-    return 0
+  if (preview.direction === direction) {
+    return {
+      ...preview,
+      scanning: true,
+      speedIndex: Math.min(
+        preview.speedIndex + 1,
+        scanSpeedMultipliers.length - 1,
+      ),
+    }
   }
 
-  return Math.min(preview.speedIndex + 1, scanSpeedMultipliers.length - 1)
+  if (preview.speedIndex > 0) {
+    return {
+      ...preview,
+      scanning: true,
+      speedIndex: preview.speedIndex - 1,
+    }
+  }
+
+  if (preview.scanning) {
+    return {
+      ...preview,
+      scanning: false,
+    }
+  }
+
+  return {
+    ...preview,
+    direction,
+    scanning: true,
+    speedIndex: 0,
+  }
 }
 
 function getProgressPercent(position: number, duration: number) {
