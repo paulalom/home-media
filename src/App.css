@@ -215,7 +215,7 @@
   box-shadow: 0 20px 44px rgb(23 24 27 / 14%);
   display: grid;
   gap: 10px;
-  min-width: min(360px, calc(100vw - 32px));
+  min-width: min(440px, calc(100vw - 32px));
   padding: 14px;
   position: absolute;
   right: 0;
@@ -238,9 +238,76 @@
   padding: 0 12px;
 }
 
-.server-settings div {
+.settings-actions {
   display: flex;
   gap: 8px;
+}
+
+.settings-actions button {
+  gap: 8px;
+}
+
+.secondary-button.danger {
+  background: #b42318;
+  border-color: #b42318;
+}
+
+.settings-section {
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 9px;
+  margin-top: 2px;
+  padding-top: 12px;
+}
+
+.settings-heading {
+  align-items: center;
+  color: var(--text-strong);
+  display: flex;
+  font-size: 0.82rem;
+  font-weight: 800;
+  justify-content: space-between;
+}
+
+.settings-heading strong {
+  color: #0f766e;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.settings-path,
+.settings-note,
+.settings-error {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin: 0;
+}
+
+.settings-path {
+  background: #f7f7f4;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.settings-metrics {
+  color: var(--text-muted);
+  display: grid;
+  font-size: 0.78rem;
+  gap: 5px;
+}
+
+.settings-note {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-error {
+  color: #b42318;
 }
 
 .stat-grid {

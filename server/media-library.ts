@@ -108,6 +108,31 @@ type ResolvedArtwork = {
   filePath: string
 }
 
+type PreviewCacheState = 'clearing' | 'idle' | 'warming'
+
+type PreviewCacheStatus = {
+  cacheBytes: number
+  cacheFiles: number
+  cacheRoot: string
+  cacheSizeLabel: string
+  cachedFrames: number
+  completedVideos: number
+  currentTitle?: string
+  failedFrames: number
+  failedVideos: number
+  generatedFrames: number
+  intervalSeconds: number
+  lastError?: string
+  pendingFrames: number
+  quality: PreviewFrameQuality
+  startedAt?: string
+  state: PreviewCacheState
+  totalFrames: number
+  totalVideos: number
+  updatedAt: string
+  width: number
+}
+
 type PreviewFrameQuality = keyof typeof PREVIEW_FRAME_SETTINGS
 
 type TmdbCredentials =
@@ -163,6 +188,7 @@ const ARTWORK_FETCH_TIMEOUT_MS = 10_000
 const ARTWORK_MISSING_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ARTWORK_BYTES = 8 * 1024 * 1024
 const PREVIEW_FRAME_TIMEOUT_MS = 8_000
+const PREVIEW_FRAME_PROBE_TIMEOUT_MS = 8_000
 const MAX_PREVIEW_FRAME_BYTES = 3 * 1024 * 1024
 const PREVIEW_FRAME_SETTINGS = {
   high: {
@@ -178,6 +204,9 @@ const PREVIEW_FRAME_SETTINGS = {
     width: 240,
   },
 } as const
+const PREVIEW_CACHE_FRAME_INTERVAL_SECONDS = 5
+const PREVIEW_CACHE_QUALITY: PreviewFrameQuality = 'low'
+const PREVIEW_CACHE_WARM_CONCURRENCY = 2
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -204,7 +233,7 @@ const IMAGE_EXTENSION_BY_MIME = new Map([
 const API_CORS_HEADERS = {
   'Access-Control-Allow-Headers': 'Content-Type, Range',
   'Access-Control-Allow-Methods':
-    'DELETE, GET, HEAD, OPTIONS, PATCH, PUT',
+    'DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Expose-Headers':
     'Accept-Ranges, Content-Length, Content-Range, Content-Type',
@@ -212,6 +241,11 @@ const API_CORS_HEADERS = {
 const MAX_JSON_BODY_BYTES = 64 * 1024
 let libraryCache: LibraryCache | null = null
 const artworkFetches = new Map<string, Promise<ResolvedArtwork | null>>()
+const previewCacheActiveWarmFrames = new Set<Promise<void>>()
+let previewCacheStatus = createInitialPreviewCacheStatus()
+let previewCacheWarmRequest: LibraryResponse | null = null
+let previewCacheWarmRunId = 0
+let previewCacheWarmRunning = false
 const previewFrameFetches = new Map<string, Promise<string>>()
 
 export function getMediaRoot() {
@@ -302,6 +336,7 @@ export async function handleMediaApi(
   const isApiPath =
     url.pathname === '/api/library' ||
     url.pathname === '/api/playback' ||
+    url.pathname === '/api/preview-cache' ||
     /^\/api\/playback\/[^/]+$/.test(url.pathname) ||
     /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|stream)$/.test(
       url.pathname,
@@ -329,6 +364,43 @@ export async function handleMediaApi(
       sendError(res, getErrorStatusCode(error), getErrorMessage(error))
     }
 
+    return true
+  }
+
+  if (url.pathname === '/api/preview-cache') {
+    if (req.method === 'GET') {
+      try {
+        sendJson(res, await getPreviewCacheStatus())
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    if (req.method === 'POST') {
+      try {
+        ensurePreviewCacheWarm(await getCachedLibrary(false))
+        sendJson(res, await getPreviewCacheStatus())
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    if (req.method === 'DELETE') {
+      try {
+        await clearPreviewCache()
+        sendJson(res, await getPreviewCacheStatus())
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    sendMethodNotAllowed(res, ['DELETE', 'GET', 'POST'])
     return true
   }
 
@@ -457,8 +529,366 @@ async function getCachedLibrary(refresh: boolean) {
     data,
     root,
   }
+  ensurePreviewCacheWarm(data)
 
   return data
+}
+
+function ensurePreviewCacheWarm(library: LibraryResponse) {
+  previewCacheWarmRequest = library
+
+  if (!previewCacheWarmRunning) {
+    void runPreviewCacheWarmLoop().catch((error: unknown) => {
+      previewCacheStatus = {
+        ...previewCacheStatus,
+        currentTitle: undefined,
+        lastError: getErrorMessage(error),
+        state: 'idle',
+        updatedAt: new Date().toISOString(),
+      }
+      previewCacheWarmRunning = false
+    })
+  }
+}
+
+async function runPreviewCacheWarmLoop() {
+  if (previewCacheWarmRunning) {
+    return
+  }
+
+  previewCacheWarmRunning = true
+
+  try {
+    while (previewCacheWarmRequest) {
+      const library = previewCacheWarmRequest
+      const runId = ++previewCacheWarmRunId
+
+      previewCacheWarmRequest = null
+      await warmPreviewCacheForLibrary(library, runId)
+    }
+  } finally {
+    previewCacheWarmRunning = false
+
+    if (previewCacheWarmRequest) {
+      ensurePreviewCacheWarm(previewCacheWarmRequest)
+    }
+  }
+}
+
+async function warmPreviewCacheForLibrary(
+  library: LibraryResponse,
+  runId: number,
+) {
+  const startedAt = new Date().toISOString()
+  const items = library.items
+
+  previewCacheStatus = {
+    ...createInitialPreviewCacheStatus('warming'),
+    startedAt,
+    totalVideos: items.length,
+    updatedAt: startedAt,
+  }
+
+  for (const item of items) {
+    if (runId !== previewCacheWarmRunId) {
+      return
+    }
+
+    await warmPreviewCacheForItem(item, runId)
+  }
+
+  if (runId === previewCacheWarmRunId) {
+    previewCacheStatus = {
+      ...previewCacheStatus,
+      currentTitle: undefined,
+      pendingFrames: 0,
+      state: 'idle',
+      updatedAt: new Date().toISOString(),
+    }
+  }
+}
+
+async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
+  previewCacheStatus = {
+    ...previewCacheStatus,
+    currentTitle: item.title,
+    updatedAt: new Date().toISOString(),
+  }
+
+  try {
+    const mediaPath = getMediaPath(item.id)
+
+    if (!mediaPath) {
+      throw new Error('Media not found')
+    }
+
+    const stats = await fs.stat(mediaPath)
+
+    if (!stats.isFile()) {
+      throw new Error('Media not found')
+    }
+
+    const duration = await probeMediaDuration(mediaPath)
+
+    if (runId !== previewCacheWarmRunId) {
+      return
+    }
+
+    const frameTimes = getPreviewCacheFrameTimes(duration)
+    const missingFrameTimes: number[] = []
+
+    previewCacheStatus = {
+      ...previewCacheStatus,
+      totalFrames: previewCacheStatus.totalFrames + frameTimes.length,
+      updatedAt: new Date().toISOString(),
+    }
+
+    for (const frameTime of frameTimes) {
+      if (runId !== previewCacheWarmRunId) {
+        return
+      }
+
+      const framePath = getPreviewFramePath(
+        item.id,
+        stats,
+        frameTime,
+        PREVIEW_CACHE_QUALITY,
+      )
+
+      if (await isFile(framePath)) {
+        previewCacheStatus = {
+          ...previewCacheStatus,
+          cachedFrames: previewCacheStatus.cachedFrames + 1,
+          updatedAt: new Date().toISOString(),
+        }
+      } else {
+        missingFrameTimes.push(frameTime)
+      }
+    }
+
+    previewCacheStatus = {
+      ...previewCacheStatus,
+      pendingFrames: previewCacheStatus.pendingFrames + missingFrameTimes.length,
+      updatedAt: new Date().toISOString(),
+    }
+
+    await runWithConcurrency(
+      missingFrameTimes,
+      PREVIEW_CACHE_WARM_CONCURRENCY,
+      async (frameTime) => {
+        if (runId !== previewCacheWarmRunId) {
+          return
+        }
+
+        try {
+          const generationPromise = resolvePreviewFrame(
+            item.id,
+            mediaPath,
+            stats,
+            frameTime,
+            PREVIEW_CACHE_QUALITY,
+          ).then(() => undefined)
+
+          previewCacheActiveWarmFrames.add(generationPromise)
+
+          try {
+            await generationPromise
+          } finally {
+            previewCacheActiveWarmFrames.delete(generationPromise)
+          }
+
+          if (runId !== previewCacheWarmRunId) {
+            return
+          }
+
+          previewCacheStatus = {
+            ...previewCacheStatus,
+            generatedFrames: previewCacheStatus.generatedFrames + 1,
+            pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
+            updatedAt: new Date().toISOString(),
+          }
+        } catch (error) {
+          if (runId !== previewCacheWarmRunId) {
+            return
+          }
+
+          previewCacheStatus = {
+            ...previewCacheStatus,
+            failedFrames: previewCacheStatus.failedFrames + 1,
+            lastError: getErrorMessage(error),
+            pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
+            updatedAt: new Date().toISOString(),
+          }
+        }
+      },
+    )
+
+    if (runId !== previewCacheWarmRunId) {
+      return
+    }
+
+    previewCacheStatus = {
+      ...previewCacheStatus,
+      completedVideos: previewCacheStatus.completedVideos + 1,
+      updatedAt: new Date().toISOString(),
+    }
+  } catch (error) {
+    if (runId !== previewCacheWarmRunId) {
+      return
+    }
+
+    previewCacheStatus = {
+      ...previewCacheStatus,
+      completedVideos: previewCacheStatus.completedVideos + 1,
+      failedVideos: previewCacheStatus.failedVideos + 1,
+      lastError: getErrorMessage(error),
+      updatedAt: new Date().toISOString(),
+    }
+  }
+}
+
+async function getPreviewCacheStatus(): Promise<PreviewCacheStatus> {
+  const directoryStats = await getDirectoryStats(getPreviewFrameCacheRoot())
+
+  return {
+    ...previewCacheStatus,
+    cacheBytes: directoryStats.bytes,
+    cacheFiles: directoryStats.files,
+    cacheRoot: getPreviewFrameCacheRoot(),
+    cacheSizeLabel: formatBytes(directoryStats.bytes),
+  }
+}
+
+async function clearPreviewCache() {
+  const cacheRoot = getPreviewFrameCacheRoot()
+
+  assertSafePreviewCacheRoot(cacheRoot)
+  previewCacheWarmRequest = null
+  previewCacheWarmRunId += 1
+  previewFrameFetches.clear()
+  previewCacheStatus = {
+    ...createInitialPreviewCacheStatus('clearing'),
+    updatedAt: new Date().toISOString(),
+  }
+
+  await Promise.allSettled([...previewCacheActiveWarmFrames])
+
+  await fs.rm(cacheRoot, { force: true, recursive: true })
+  await fs.mkdir(cacheRoot, { recursive: true })
+
+  previewCacheStatus = {
+    ...createInitialPreviewCacheStatus('idle'),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function createInitialPreviewCacheStatus(
+  state: PreviewCacheState = 'idle',
+): PreviewCacheStatus {
+  const cacheRoot = getPreviewFrameCacheRoot()
+
+  return {
+    cacheBytes: 0,
+    cacheFiles: 0,
+    cacheRoot,
+    cacheSizeLabel: formatBytes(0),
+    cachedFrames: 0,
+    completedVideos: 0,
+    failedFrames: 0,
+    failedVideos: 0,
+    generatedFrames: 0,
+    intervalSeconds: PREVIEW_CACHE_FRAME_INTERVAL_SECONDS,
+    pendingFrames: 0,
+    quality: PREVIEW_CACHE_QUALITY,
+    state,
+    totalFrames: 0,
+    totalVideos: 0,
+    updatedAt: new Date().toISOString(),
+    width: PREVIEW_FRAME_SETTINGS[PREVIEW_CACHE_QUALITY].width,
+  }
+}
+
+function getPreviewCacheFrameTimes(duration: number) {
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0
+  const frameTimes: number[] = []
+
+  for (
+    let frameTime = 0;
+    frameTime < safeDuration;
+    frameTime += PREVIEW_CACHE_FRAME_INTERVAL_SECONDS
+  ) {
+    frameTimes.push(
+      getPreviewFrameTime(String(frameTime), PREVIEW_CACHE_QUALITY),
+    )
+  }
+
+  return [...new Set(frameTimes)]
+}
+
+function runWithConcurrency<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+) {
+  let nextIndex = 0
+  const workerCount = Math.min(Math.max(concurrency, 1), items.length)
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex]
+
+      nextIndex += 1
+      await worker(item)
+    }
+  })
+
+  return Promise.all(workers)
+}
+
+async function getDirectoryStats(directory: string): Promise<{
+  bytes: number
+  files: number
+}> {
+  let entries
+
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true })
+  } catch {
+    return {
+      bytes: 0,
+      files: 0,
+    }
+  }
+
+  let bytes = 0
+  let files = 0
+
+  for (const entry of entries) {
+    const entryPath = join(directory, entry.name)
+
+    if (entry.isDirectory()) {
+      const nestedStats = await getDirectoryStats(entryPath)
+
+      bytes += nestedStats.bytes
+      files += nestedStats.files
+      continue
+    }
+
+    if (entry.isFile()) {
+      try {
+        const stats = await fs.stat(entryPath)
+
+        bytes += stats.size
+        files += 1
+      } catch {
+        // Ignore files that are deleted while status is being computed.
+      }
+    }
+  }
+
+  return {
+    bytes,
+    files,
+  }
 }
 
 async function collectMediaFiles(
@@ -657,14 +1087,7 @@ async function resolvePreviewFrame(
   frameTime: number,
   quality: PreviewFrameQuality,
 ) {
-  const cacheRoot = getPreviewFrameCacheRoot()
-  const cacheKey = createPreviewFrameCacheKey(
-    mediaId,
-    stats,
-    frameTime,
-    quality,
-  )
-  const framePath = join(cacheRoot, `${cacheKey}.jpg`)
+  const framePath = getPreviewFramePath(mediaId, stats, frameTime, quality)
 
   if (await isFile(framePath)) {
     return framePath
@@ -728,6 +1151,11 @@ function extractPreviewFrame(
         ...(settings.fastSeek ? ['-noaccurate_seek'] : []),
         '-i',
         mediaPath,
+        '-map',
+        '0:v:0',
+        '-an',
+        '-sn',
+        '-dn',
         '-frames:v',
         '1',
         '-vf',
@@ -825,6 +1253,82 @@ function getPreviewFrameTime(
   return Math.max(Math.round(requestedTime / bucketSeconds) * bucketSeconds, 0)
 }
 
+function probeMediaDuration(mediaPath: string) {
+  return new Promise<number>((resolvePromise, rejectPromise) => {
+    const ffprobe = spawn(
+      getFfprobeExecutable(),
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        mediaPath,
+      ],
+      {
+        windowsHide: true,
+      },
+    )
+    const chunks: Buffer[] = []
+    const errorChunks: Buffer[] = []
+    let settled = false
+    const timeout = setTimeout(() => {
+      finish(new Error('Preview frame duration probe timed out'))
+      ffprobe.kill()
+    }, PREVIEW_FRAME_PROBE_TIMEOUT_MS)
+
+    function finish(error: Error | null, duration?: number) {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      clearTimeout(timeout)
+
+      if (error) {
+        rejectPromise(error)
+        return
+      }
+
+      resolvePromise(duration ?? 0)
+    }
+
+    ffprobe.stdout.on('data', (chunk: Buffer) => {
+      chunks.push(chunk)
+    })
+
+    ffprobe.stderr.on('data', (chunk: Buffer) => {
+      errorChunks.push(chunk)
+    })
+
+    ffprobe.on('error', (error) => {
+      finish(error)
+    })
+
+    ffprobe.on('close', (code) => {
+      if (settled) {
+        return
+      }
+
+      const rawDuration = Buffer.concat(chunks).toString('utf8').trim()
+      const duration = Number(rawDuration)
+
+      if (code === 0 && Number.isFinite(duration) && duration > 0) {
+        finish(null, duration)
+        return
+      }
+
+      const stderr = Buffer.concat(errorChunks).toString('utf8').trim()
+      const message = stderr
+        ? `Preview frame duration probe failed: ${stderr}`
+        : `Preview frame duration probe failed (${code ?? 'unknown exit'})`
+
+      finish(new Error(message))
+    })
+  })
+}
+
 function createPreviewFrameCacheKey(
   mediaId: string,
   stats: Stats,
@@ -844,8 +1348,72 @@ function createPreviewFrameCacheKey(
     .digest('hex')
 }
 
+function getPreviewFramePath(
+  mediaId: string,
+  stats: Stats,
+  frameTime: number,
+  quality: PreviewFrameQuality,
+) {
+  return join(
+    getPreviewFrameCacheRoot(),
+    `${createPreviewFrameCacheKey(mediaId, stats, frameTime, quality)}.jpg`,
+  )
+}
+
+function assertSafePreviewCacheRoot(cacheRoot: string) {
+  const resolvedCacheRoot = resolve(cacheRoot)
+  const parent = dirname(resolvedCacheRoot)
+
+  if (parent === resolvedCacheRoot) {
+    throw new Error('Preview cache folder cannot be a filesystem root')
+  }
+
+  const protectedRoots = [
+    homedir(),
+    process.env.LOCALAPPDATA?.trim(),
+  ].filter((value): value is string => Boolean(value))
+
+  if (
+    protectedRoots.some((protectedRoot) => {
+      return resolve(protectedRoot) === resolvedCacheRoot
+    })
+  ) {
+    throw new Error('Preview cache folder is too broad to clear')
+  }
+
+  const mediaRoot = resolve(getMediaRoot())
+
+  if (isPathInside(resolvedCacheRoot, mediaRoot)) {
+    throw new Error('Preview cache folder cannot contain the media library')
+  }
+}
+
 function getFfmpegExecutable() {
   return process.env.HOME_MEDIA_FFMPEG_PATH?.trim() || 'ffmpeg'
+}
+
+function getFfprobeExecutable() {
+  const configuredPath = process.env.HOME_MEDIA_FFPROBE_PATH?.trim()
+
+  if (configuredPath) {
+    return configuredPath
+  }
+
+  const configuredFfmpegPath = process.env.HOME_MEDIA_FFMPEG_PATH?.trim()
+
+  if (configuredFfmpegPath) {
+    const executableName = basename(configuredFfmpegPath).toLowerCase()
+
+    if (executableName === 'ffmpeg.exe') {
+      return join(dirname(configuredFfmpegPath), 'ffprobe.exe')
+    }
+
+    if (executableName === 'ffmpeg') {
+      return join(dirname(configuredFfmpegPath), 'ffprobe')
+    }
+  }
+
+  return 'ffprobe'
 }
 
 function formatFfmpegTime(seconds: number) {

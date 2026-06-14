@@ -200,6 +200,8 @@ function TvApp() {
   const playerScanHoldTimeoutRef = useRef<number | null>(null)
   const playerScanIntervalRef = useRef<number | null>(null)
   const playerScanLastTickRef = useRef<number | null>(null)
+  const playerScanPreloadImagesRef = useRef<HTMLImageElement[]>([])
+  const playerScanPreloadKeyRef = useRef('')
   const playerScanPreviewRef = useRef<ScanPreview | null>(null)
   const playerScanWasPlayingRef = useRef(false)
   const playerRef = useRef<HTMLVideoElement | null>(null)
@@ -266,6 +268,8 @@ function TvApp() {
       playerScanHoldTimeoutRef.current = null
       playerScanIntervalRef.current = null
       playerScanLastTickRef.current = null
+      playerScanPreloadImagesRef.current = []
+      playerScanPreloadKeyRef.current = ''
       playerScanPreviewRef.current = null
       playerScanWasPlayingRef.current = false
     }
@@ -274,6 +278,45 @@ function TvApp() {
   useEffect(() => {
     playerScanPreviewRef.current = scanPreview
   }, [scanPreview])
+
+  useEffect(() => {
+    if (!playerItem || !scanPreview?.scanning) {
+      playerScanPreloadImagesRef.current = []
+      playerScanPreloadKeyRef.current = ''
+      return
+    }
+
+    const bucketSeconds = getScanPreviewFrameBucketSeconds(scanPreview)
+    const framePosition = getScanPreviewFramePosition(
+      scanPreview.position,
+      bucketSeconds,
+    )
+    const preloadKey = [
+      playerItem.id,
+      scanPreview.direction,
+      bucketSeconds,
+      framePosition,
+    ].join(':')
+
+    if (playerScanPreloadKeyRef.current === preloadKey) {
+      return
+    }
+
+    playerScanPreloadKeyRef.current = preloadKey
+    playerScanPreloadImagesRef.current = getScanPreviewPreloadFrameUrls(
+      playerItem,
+      scanPreview,
+      apiBase,
+      playerClock.duration,
+    ).map((url) => {
+      const image = new Image()
+
+      image.decoding = 'async'
+      image.src = url
+
+      return image
+    })
+  }, [apiBase, playerClock.duration, playerItem, scanPreview])
 
   useEffect(() => {
     registerSamsungRemoteKeys()
@@ -1985,8 +2028,20 @@ function getScanPreviewFrameUrl(
 ) {
   const quality = preview.scanning ? 'low' : 'high'
   const bucketSeconds = getScanPreviewFrameBucketSeconds(preview)
-  const framePosition =
-    Math.round(preview.position / bucketSeconds) * bucketSeconds
+  const framePosition = getScanPreviewFramePosition(
+    preview.position,
+    bucketSeconds,
+  )
+
+  return getPreviewFrameUrl(item, apiBase, quality, framePosition)
+}
+
+function getPreviewFrameUrl(
+  item: MediaItem,
+  apiBase: string,
+  quality: 'high' | 'low',
+  framePosition: number,
+) {
   const params = new URLSearchParams({
     quality,
     t: String(Math.max(framePosition, 0)),
@@ -1996,6 +2051,44 @@ function getScanPreviewFrameUrl(
     `/api/media/${encodeURIComponent(item.id)}/preview-frame?${params}`,
     apiBase,
   )
+}
+
+function getScanPreviewPreloadFrameUrls(
+  item: MediaItem,
+  preview: ScanPreview,
+  apiBase: string,
+  duration: number,
+) {
+  if (!preview.scanning) {
+    return []
+  }
+
+  const bucketSeconds = getScanPreviewFrameBucketSeconds(preview)
+  const framePosition = getScanPreviewFramePosition(
+    preview.position,
+    bucketSeconds,
+  )
+  const frameUrls: string[] = []
+
+  for (let index = 1; index <= 2; index += 1) {
+    const preloadPosition =
+      framePosition + preview.direction * bucketSeconds * index
+
+    if (
+      preloadPosition < 0 ||
+      (duration > 0 && preloadPosition > duration)
+    ) {
+      continue
+    }
+
+    frameUrls.push(getPreviewFrameUrl(item, apiBase, 'low', preloadPosition))
+  }
+
+  return frameUrls
+}
+
+function getScanPreviewFramePosition(position: number, bucketSeconds: number) {
+  return Math.max(Math.round(position / bucketSeconds) * bucketSeconds, 0)
 }
 
 function getScanPreviewFrameBucketSeconds(preview: ScanPreview) {

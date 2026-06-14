@@ -20,6 +20,7 @@ import {
   Search,
   Server,
   Settings,
+  Trash2,
   Tv,
   Video,
   type LucideIcon,
@@ -78,6 +79,28 @@ type LibraryResponse = {
   }
   sources: SourceSummary[]
   items: MediaItem[]
+}
+
+type PreviewCacheStatus = {
+  cacheBytes: number
+  cacheFiles: number
+  cacheRoot: string
+  cacheSizeLabel: string
+  cachedFrames: number
+  completedVideos: number
+  currentTitle?: string
+  failedFrames: number
+  failedVideos: number
+  generatedFrames: number
+  intervalSeconds: number
+  lastError?: string
+  pendingFrames: number
+  quality: 'high' | 'low'
+  state: 'clearing' | 'idle' | 'warming'
+  totalFrames: number
+  totalVideos: number
+  updatedAt: string
+  width: number
 }
 
 type MovieTitle = {
@@ -159,6 +182,48 @@ async function fetchLibrary(
   return (await response.json()) as LibraryResponse
 }
 
+async function fetchPreviewCacheStatus(
+  apiBase: string,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(buildApiUrl('/api/preview-cache', apiBase), {
+    cache: 'no-store',
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Preview cache status failed (${response.status})`)
+  }
+
+  return (await response.json()) as PreviewCacheStatus
+}
+
+async function startPreviewCacheWarm(apiBase: string) {
+  const response = await fetch(buildApiUrl('/api/preview-cache', apiBase), {
+    cache: 'no-store',
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Preview cache warm failed (${response.status})`)
+  }
+
+  return (await response.json()) as PreviewCacheStatus
+}
+
+async function clearPreviewCache(apiBase: string) {
+  const response = await fetch(buildApiUrl('/api/preview-cache', apiBase), {
+    cache: 'no-store',
+    method: 'DELETE',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Preview cache clear failed (${response.status})`)
+  }
+
+  return (await response.json()) as PreviewCacheStatus
+}
+
 function App() {
   const [apiBase, setApiBase] = useState(readInitialApiBase)
   const [apiBaseDraft, setApiBaseDraft] = useState(apiBase)
@@ -169,6 +234,10 @@ function App() {
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
     readLocalPlaybackHistory,
   )
+  const [previewCacheActionRunning, setPreviewCacheActionRunning] =
+    useState(false)
+  const [previewCacheStatus, setPreviewCacheStatus] =
+    useState<PreviewCacheStatus | null>(null)
   const [query, setQuery] = useState('')
   const [scanRunning, setScanRunning] = useState(false)
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(
@@ -253,6 +322,45 @@ function App() {
 
     return () => controller.abort()
   }, [apiBase])
+
+  useEffect(() => {
+    if (!showSettings) {
+      return
+    }
+
+    const controller = new AbortController()
+    let timeoutId: number | null = null
+
+    function scheduleRefresh() {
+      timeoutId = window.setTimeout(loadStatus, 1500)
+    }
+
+    function loadStatus() {
+      fetchPreviewCacheStatus(apiBase, controller.signal)
+        .then((nextStatus) => {
+          setPreviewCacheStatus(nextStatus)
+
+          if (!controller.signal.aborted) {
+            scheduleRefresh()
+          }
+        })
+        .catch((requestError: unknown) => {
+          if (!controller.signal.aborted) {
+            setError(getErrorMessage(requestError))
+          }
+        })
+    }
+
+    loadStatus()
+
+    return () => {
+      controller.abort()
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
+    }
+  }, [apiBase, showSettings])
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -503,6 +611,32 @@ function App() {
     setShowSettings(false)
   }
 
+  async function warmPreviewCache() {
+    setPreviewCacheActionRunning(true)
+    setError(null)
+
+    try {
+      setPreviewCacheStatus(await startPreviewCacheWarm(apiBase))
+    } catch (requestError) {
+      setError(getErrorMessage(requestError))
+    } finally {
+      setPreviewCacheActionRunning(false)
+    }
+  }
+
+  async function removePreviewCache() {
+    setPreviewCacheActionRunning(true)
+    setError(null)
+
+    try {
+      setPreviewCacheStatus(await clearPreviewCache(apiBase))
+    } catch (requestError) {
+      setError(getErrorMessage(requestError))
+    } finally {
+      setPreviewCacheActionRunning(false)
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -591,7 +725,7 @@ function App() {
                   placeholder="http://192.168.1.25:4173"
                   value={apiBaseDraft}
                 />
-                <div>
+                <div className="settings-actions">
                   <button className="secondary-button" type="submit">
                     Save
                   </button>
@@ -603,6 +737,73 @@ function App() {
                     This host
                   </button>
                 </div>
+                <section className="settings-section" aria-label="Preview cache">
+                  <div className="settings-heading">
+                    <span>Preview cache</span>
+                    <strong>
+                      {previewCacheStatus
+                        ? formatPreviewCacheState(previewCacheStatus)
+                        : 'Loading'}
+                    </strong>
+                  </div>
+                  <p
+                    className="settings-path"
+                    title={previewCacheStatus?.cacheRoot}
+                  >
+                    {previewCacheStatus?.cacheRoot ?? 'Checking cache folder'}
+                  </p>
+                  <div className="settings-metrics">
+                    <span>
+                      {previewCacheStatus?.cacheSizeLabel ?? '0 B'} /{' '}
+                      {formatNumber(previewCacheStatus?.cacheFiles ?? 0)} files
+                    </span>
+                    <span>
+                      {formatNumber(
+                        (previewCacheStatus?.cachedFrames ?? 0) +
+                          (previewCacheStatus?.generatedFrames ?? 0),
+                      )}{' '}
+                      / {formatNumber(previewCacheStatus?.totalFrames ?? 0)}{' '}
+                      frames
+                    </span>
+                    <span>
+                      {formatNumber(previewCacheStatus?.completedVideos ?? 0)} /{' '}
+                      {formatNumber(previewCacheStatus?.totalVideos ?? 0)} videos
+                    </span>
+                  </div>
+                  {previewCacheStatus?.currentTitle ? (
+                    <p className="settings-note">
+                      {previewCacheStatus.currentTitle}
+                    </p>
+                  ) : null}
+                  {previewCacheStatus?.lastError ? (
+                    <p className="settings-error">
+                      {previewCacheStatus.lastError}
+                    </p>
+                  ) : null}
+                  <div className="settings-actions">
+                    <button
+                      className="secondary-button subtle"
+                      disabled={
+                        previewCacheActionRunning ||
+                        previewCacheStatus?.state === 'clearing'
+                      }
+                      onClick={warmPreviewCache}
+                      type="button"
+                    >
+                      <RefreshCcw size={16} />
+                      Warm
+                    </button>
+                    <button
+                      className="secondary-button danger"
+                      disabled={previewCacheActionRunning}
+                      onClick={removePreviewCache}
+                      type="button"
+                    >
+                      <Trash2 size={16} />
+                      Clear
+                    </button>
+                  </div>
+                </section>
               </form>
             ) : null}
           </div>
@@ -1231,6 +1432,20 @@ function getErrorMessage(error: unknown) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value)
+}
+
+function formatPreviewCacheState(status: PreviewCacheStatus) {
+  if (status.state === 'warming') {
+    return status.pendingFrames > 0
+      ? `Warming ${formatNumber(status.pendingFrames)}`
+      : 'Warming'
+  }
+
+  if (status.state === 'clearing') {
+    return 'Clearing'
+  }
+
+  return 'Idle'
 }
 
 function formatScanTime(value: string) {
