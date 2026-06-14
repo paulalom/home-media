@@ -1773,6 +1773,7 @@ function TvApp() {
           >
             {getPrimaryActionLabel(
               selectedTitle,
+              selectedItem,
               selectedPlayback,
               selectedTitleIsContinue,
             )}
@@ -2240,6 +2241,7 @@ function getScanPreviewPreloadFrameCount(preview: ScanPreview) {
 
 function getPrimaryActionLabel(
   title: TvTitle | null,
+  item: MediaItem | null,
   playback: PlaybackRecord | null,
   isContinue: boolean,
 ) {
@@ -2251,7 +2253,13 @@ function getPrimaryActionLabel(
     return title.kind === 'show' ? 'Episodes' : 'Details'
   }
 
-  return playback && !playback.completed ? 'Resume' : 'Play'
+  const actionLabel = playback && !playback.completed ? 'Resume' : 'Play'
+
+  if (title.kind === 'show' && item && hasEpisodeCode(item)) {
+    return `${actionLabel} ${formatEpisodeNumber(item)}`
+  }
+
+  return actionLabel
 }
 
 function getDefaultDetailItemIndex(title: TvTitle, history: PlaybackHistory) {
@@ -2283,6 +2291,10 @@ function getDetailItemLabel(item: MediaItem) {
 
 function getDetailItemTitle(item: MediaItem) {
   return item.episodeTitle ?? item.title
+}
+
+function hasEpisodeCode(item: MediaItem) {
+  return Boolean(item.seasonNumber || item.episodeNumber)
 }
 
 function getDetailPlaybackLabel(
