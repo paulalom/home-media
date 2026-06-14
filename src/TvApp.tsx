@@ -149,7 +149,7 @@ const scanPreviewHighFrameBucketSeconds = 1
 const scanPreviewLowFrameBucketSeconds = 30
 const scanPreviewBaseSecondsPerSecond = 5
 const scanPreviewTickMs = 120
-const scanSpeedMultipliers = [2, 3, 4] as const
+const scanSpeedMultipliers = [2, 3, 4, 5, 6, 7, 8, 9, 10] as const
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
 
 async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
@@ -198,6 +198,7 @@ function TvApp() {
   const playerScanIntervalRef = useRef<number | null>(null)
   const playerScanLastTickRef = useRef<number | null>(null)
   const playerScanPreviewRef = useRef<ScanPreview | null>(null)
+  const playerScanWasPlayingRef = useRef(false)
   const playerRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
   const selectedCardRef = useRef<HTMLButtonElement | null>(null)
@@ -258,6 +259,7 @@ function TvApp() {
       playerScanIntervalRef.current = null
       playerScanLastTickRef.current = null
       playerScanPreviewRef.current = null
+      playerScanWasPlayingRef.current = false
     }
   }, [])
 
@@ -524,13 +526,20 @@ function TvApp() {
     }
 
     if (action === 'play') {
+      if (resumeScanPreview()) {
+        return
+      }
+
       cancelScanPreview()
       playPlayer()
       return
     }
 
     if (action === 'pause') {
-      cancelScanPreview()
+      if (pauseScanPreview()) {
+        return
+      }
+
       pausePlayer()
       return
     }
@@ -545,7 +554,10 @@ function TvApp() {
     }
 
     if (action === 'playPause') {
-      cancelScanPreview()
+      if (pauseScanPreview()) {
+        return
+      }
+
       togglePlayer()
       return
     }
@@ -854,21 +866,13 @@ function TvApp() {
 
     if (playerScanHoldTimeoutRef.current !== null) {
       clearScanHoldTimeout()
-      skipPlayer(direction * playerSeekStepSeconds)
+
+      if (!playerScanPreviewRef.current) {
+        skipPlayer(direction * playerSeekStepSeconds)
+      }
+
       return
     }
-
-    const preview = playerScanPreviewRef.current
-
-    if (!preview) {
-      return
-    }
-
-    setScanPreviewState({
-      ...preview,
-      scanning: false,
-    })
-    stopScanPreviewTicker()
   }
 
   function beginScanPreview(
@@ -891,6 +895,12 @@ function TvApp() {
     clearScanHoldTimeout()
 
     const currentPreview = playerScanPreviewRef.current
+
+    if (!currentPreview) {
+      playerScanWasPlayingRef.current = !player.paused && !player.ended
+      player.pause()
+    }
+
     const clampedPreview = currentPreview
       ? {
           ...currentPreview,
@@ -929,11 +939,57 @@ function TvApp() {
 
     const duration = getFiniteVideoDuration(player)
     const nextPosition = clamp(preview.position, 0, duration || preview.position)
+    const shouldResumePlayback = playerScanWasPlayingRef.current && !player.ended
 
     player.currentTime = nextPosition
     updatePlayerClockFromValues(duration, nextPosition)
     clearScanPreview()
-    showPlayerHud(!player.paused && !player.ended)
+
+    if (shouldResumePlayback) {
+      void player.play()
+      showPlayerHud(true)
+    } else {
+      showPlayerHud()
+    }
+
+    return true
+  }
+
+  function pauseScanPreview() {
+    const preview = playerScanPreviewRef.current
+
+    if (!preview) {
+      return false
+    }
+
+    playerScanWasPlayingRef.current = false
+    setScanPreviewState({
+      ...preview,
+      scanning: false,
+    })
+    stopScanPreviewTicker()
+    showPlayerHud()
+
+    return true
+  }
+
+  function resumeScanPreview() {
+    const preview = playerScanPreviewRef.current
+
+    if (!preview) {
+      return false
+    }
+
+    if (!preview.scanning) {
+      setScanPreviewState({
+        ...preview,
+        scanning: true,
+      })
+      playerScanLastTickRef.current = window.performance.now()
+      startScanPreviewTicker()
+    }
+
+    showPlayerHud()
 
     return true
   }
@@ -951,6 +1007,7 @@ function TvApp() {
     clearScanHoldTimeout()
     stopScanPreviewTicker()
     playerScanHeldDirectionRef.current = null
+    playerScanWasPlayingRef.current = false
 
     if (resetState) {
       setScanPreviewState(null)
@@ -2085,7 +2142,7 @@ function formatPlayerClock(clock: PlayerClock) {
 
 function formatScanPreviewMode(preview: ScanPreview) {
   if (!preview.scanning) {
-    return 'Preview paused'
+    return '0x Paused'
   }
 
   const directionLabel = preview.direction > 0 ? 'FF' : 'REW'
@@ -2098,6 +2155,14 @@ function getSteppedScanPreview(
   direction: ScanDirection,
 ) {
   if (preview.direction === direction) {
+    if (!preview.scanning) {
+      return {
+        ...preview,
+        scanning: true,
+        speedIndex: 0,
+      }
+    }
+
     return {
       ...preview,
       scanning: true,
