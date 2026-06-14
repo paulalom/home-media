@@ -146,11 +146,12 @@ const playerHudHideDelayMs = 1000
 const playerSeekStepSeconds = 5
 const scanHoldDelayMs = 320
 const scanPreviewHighFrameBucketSeconds = 1
-const scanPreviewSlowFrameBucketSeconds = 5
-const scanPreviewMediumFrameBucketSeconds = 10
-const scanPreviewFastFrameBucketSeconds = 30
+const scanPreviewLowFrameBucketSeconds = 5
 const scanPreviewBaseSecondsPerSecond = 5
 const scanPreviewTickMs = 120
+const scanPreviewPreloadLookaheadSeconds = 3
+const scanPreviewPreloadMinimumFrames = 8
+const scanPreviewPreloadMaximumFrames = 40
 const scanSpeedMultipliers = [2, 3, 4, 5, 6, 7, 8, 9, 10] as const
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
 
@@ -190,6 +191,8 @@ function TvApp() {
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null)
+  const [scanPreviewVisibleFrameUrl, setScanPreviewVisibleFrameUrl] =
+    useState('')
   const playbackHistoryRef = useRef(playbackHistory)
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
@@ -200,7 +203,11 @@ function TvApp() {
   const playerScanHoldTimeoutRef = useRef<number | null>(null)
   const playerScanIntervalRef = useRef<number | null>(null)
   const playerScanLastTickRef = useRef<number | null>(null)
-  const playerScanPreloadImagesRef = useRef<HTMLImageElement[]>([])
+  const playerScanFrameLoadTokenRef = useRef(0)
+  const playerScanLoadedFrameUrlsRef = useRef<Set<string>>(new Set())
+  const playerScanPreloadImagesRef = useRef<Map<string, HTMLImageElement>>(
+    new Map(),
+  )
   const playerScanPreloadKeyRef = useRef('')
   const playerScanPreviewRef = useRef<ScanPreview | null>(null)
   const playerScanWasPlayingRef = useRef(false)
@@ -246,6 +253,9 @@ function TvApp() {
   }, [apiBase])
 
   useEffect(() => {
+    const loadedFrameUrls = playerScanLoadedFrameUrlsRef.current
+    const preloadImages = playerScanPreloadImagesRef.current
+
     return () => {
       if (playerHudTimeoutRef.current !== null) {
         window.clearTimeout(playerHudTimeoutRef.current)
@@ -268,7 +278,9 @@ function TvApp() {
       playerScanHoldTimeoutRef.current = null
       playerScanIntervalRef.current = null
       playerScanLastTickRef.current = null
-      playerScanPreloadImagesRef.current = []
+      playerScanFrameLoadTokenRef.current += 1
+      loadedFrameUrls.clear()
+      preloadImages.clear()
       playerScanPreloadKeyRef.current = ''
       playerScanPreviewRef.current = null
       playerScanWasPlayingRef.current = false
@@ -280,8 +292,43 @@ function TvApp() {
   }, [scanPreview])
 
   useEffect(() => {
+    if (!scanPreviewFrameUrl) {
+      playerScanFrameLoadTokenRef.current += 1
+      return
+    }
+
+    const loadToken = playerScanFrameLoadTokenRef.current + 1
+
+    playerScanFrameLoadTokenRef.current = loadToken
+
+    if (playerScanLoadedFrameUrlsRef.current.has(scanPreviewFrameUrl)) {
+      const timeoutId = window.setTimeout(() => {
+        if (playerScanFrameLoadTokenRef.current === loadToken) {
+          setScanPreviewVisibleFrameUrl(scanPreviewFrameUrl)
+        }
+      }, 0)
+
+      return () => window.clearTimeout(timeoutId)
+    }
+
+    const image = new Image()
+
+    image.decoding = 'async'
+    image.onload = () => {
+      markScanPreviewFrameReady(image, scanPreviewFrameUrl, () => {
+        if (playerScanFrameLoadTokenRef.current !== loadToken) {
+          return
+        }
+
+        setScanPreviewVisibleFrameUrl(scanPreviewFrameUrl)
+      })
+    }
+    image.src = scanPreviewFrameUrl
+  }, [scanPreviewFrameUrl])
+
+  useEffect(() => {
     if (!playerItem || !scanPreview?.scanning) {
-      playerScanPreloadImagesRef.current = []
+      playerScanPreloadImagesRef.current.clear()
       playerScanPreloadKeyRef.current = ''
       return
     }
@@ -303,19 +350,31 @@ function TvApp() {
     }
 
     playerScanPreloadKeyRef.current = preloadKey
-    playerScanPreloadImagesRef.current = getScanPreviewPreloadFrameUrls(
+    const nextPreloadImages = new Map<string, HTMLImageElement>()
+
+    for (const url of getScanPreviewPreloadFrameUrls(
       playerItem,
       scanPreview,
       apiBase,
       playerClock.duration,
-    ).map((url) => {
+    )) {
+      const existingImage = playerScanPreloadImagesRef.current.get(url)
+
+      if (existingImage) {
+        nextPreloadImages.set(url, existingImage)
+        continue
+      }
+
       const image = new Image()
-
       image.decoding = 'async'
+      image.onload = () => {
+        markScanPreviewFrameReady(image, url)
+      }
       image.src = url
+      nextPreloadImages.set(url, image)
+    }
 
-      return image
-    })
+    playerScanPreloadImagesRef.current = nextPreloadImages
   }, [apiBase, playerClock.duration, playerItem, scanPreview])
 
   useEffect(() => {
@@ -834,6 +893,7 @@ function TvApp() {
     }
 
     clearScanPreview()
+    clearScanPreviewImages()
     clearPlayerHudTimeout()
     setPlayerClock({
       duration: 0,
@@ -850,6 +910,7 @@ function TvApp() {
     }
 
     clearScanPreview()
+    clearScanPreviewImages()
     clearPlayerHudTimeout()
     setPlayerItem(null)
   }
@@ -1090,6 +1151,32 @@ function TvApp() {
     } else {
       playerScanPreviewRef.current = null
     }
+  }
+
+  function clearScanPreviewImages() {
+    playerScanFrameLoadTokenRef.current += 1
+    playerScanLoadedFrameUrlsRef.current.clear()
+    playerScanPreloadImagesRef.current.clear()
+    playerScanPreloadKeyRef.current = ''
+    setScanPreviewVisibleFrameUrl('')
+  }
+
+  function markScanPreviewFrameReady(
+    image: HTMLImageElement,
+    url: string,
+    onReady?: () => void,
+  ) {
+    const markReady = () => {
+      playerScanLoadedFrameUrlsRef.current.add(url)
+      onReady?.()
+    }
+
+    if (typeof image.decode !== 'function') {
+      markReady()
+      return
+    }
+
+    void image.decode().then(markReady, markReady)
   }
 
   function clearScanHoldTimeout() {
@@ -1424,16 +1511,16 @@ function TvApp() {
           {scanPreview ? (
             <>
               <div className="tv-scan-thumbnail">
-                <img
-                  alt=""
-                  className="tv-scan-thumbnail-image"
-                  decoding="async"
-                  draggable={false}
-                  key={scanPreviewFrameUrl}
-                  loading="eager"
-                  onError={hideFailedArtwork}
-                  src={scanPreviewFrameUrl}
-                />
+                {scanPreviewVisibleFrameUrl ? (
+                  <img
+                    alt=""
+                    className="tv-scan-thumbnail-image"
+                    decoding="async"
+                    draggable={false}
+                    loading="eager"
+                    src={scanPreviewVisibleFrameUrl}
+                  />
+                ) : null}
                 <span>{formatDuration(scanPreview.position)}</span>
               </div>
               <div className="tv-scan-details">
@@ -2085,7 +2172,9 @@ function getScanPreviewPreloadFrameUrls(
   )
   const frameUrls: string[] = []
 
-  for (let index = 1; index <= 2; index += 1) {
+  const preloadFrameCount = getScanPreviewPreloadFrameCount(preview)
+
+  for (let index = 1; index <= preloadFrameCount; index += 1) {
     const preloadPosition =
       framePosition + preview.direction * bucketSeconds * index
 
@@ -2111,17 +2200,21 @@ function getScanPreviewFrameBucketSeconds(preview: ScanPreview) {
     return scanPreviewHighFrameBucketSeconds
   }
 
-  const multiplier = scanSpeedMultipliers[preview.speedIndex]
+  return scanPreviewLowFrameBucketSeconds
+}
 
-  if (multiplier >= 10) {
-    return scanPreviewFastFrameBucketSeconds
-  }
+function getScanPreviewPreloadFrameCount(preview: ScanPreview) {
+  const scanSecondsPerSecond =
+    scanSpeedMultipliers[preview.speedIndex] * scanPreviewBaseSecondsPerSecond
+  const framesPerSecond = Math.ceil(
+    scanSecondsPerSecond / scanPreviewLowFrameBucketSeconds,
+  )
 
-  if (multiplier >= 5) {
-    return scanPreviewMediumFrameBucketSeconds
-  }
-
-  return scanPreviewSlowFrameBucketSeconds
+  return clamp(
+    framesPerSecond * scanPreviewPreloadLookaheadSeconds,
+    scanPreviewPreloadMinimumFrames,
+    scanPreviewPreloadMaximumFrames,
+  )
 }
 
 function getPrimaryActionLabel(
