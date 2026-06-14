@@ -201,6 +201,8 @@ const ARTWORK_FETCH_TIMEOUT_MS = 10_000
 const ARTWORK_MISSING_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ARTWORK_BYTES = 8 * 1024 * 1024
 const PREVIEW_FRAME_TIMEOUT_MS = 8_000
+const PREVIEW_FRAME_BATCH_MAX_TIMEOUT_MS = 10 * 60_000
+const PREVIEW_FRAME_BATCH_TIMEOUT_MS_PER_FRAME = 1_000
 const PREVIEW_FRAME_PROBE_TIMEOUT_MS = 8_000
 const MAX_PREVIEW_FRAME_BYTES = 3 * 1024 * 1024
 const PREVIEW_FRAME_SETTINGS = {
@@ -219,11 +221,11 @@ const PREVIEW_FRAME_SETTINGS = {
 } as const
 const PREVIEW_CACHE_FRAME_INTERVAL_SECONDS = 5
 const PREVIEW_CACHE_QUALITY: PreviewFrameQuality = 'low'
+const PREVIEW_CACHE_BACKGROUND_BATCH_FRAME_COUNT = 60
 const PREVIEW_CACHE_BACKGROUND_CPU_BUDGET = 0.25
 const PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS = 1
-const PREVIEW_CACHE_BACKGROUND_WARM_CONCURRENCY = 1
+const PREVIEW_CACHE_FOREGROUND_BATCH_FRAME_COUNT = Number.POSITIVE_INFINITY
 const PREVIEW_CACHE_FOREGROUND_CPU_BUDGET = 1
-const PREVIEW_CACHE_FOREGROUND_WARM_CONCURRENCY = 2
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -718,62 +720,13 @@ async function warmPreviewCacheForItem(item: MediaItem, runId: number) {
       updatedAt: new Date().toISOString(),
     }
 
-    await runWithConcurrency(
+    await warmMissingPreviewFrames(
+      item.id,
+      mediaPath,
+      stats,
+      frameTimes,
       missingFrameTimes,
-      getPreviewCacheWarmSettings().concurrency,
-      async (frameTime) => {
-        if (runId !== previewCacheWarmRunId) {
-          return
-        }
-
-        try {
-          const generationStartedAt = Date.now()
-          const warmSettings = getPreviewCacheWarmSettings()
-          const generationPromise = resolvePreviewFrame(
-            item.id,
-            mediaPath,
-            stats,
-            frameTime,
-            PREVIEW_CACHE_QUALITY,
-            {
-              threads: warmSettings.ffmpegThreads,
-            },
-          ).then(() => undefined)
-
-          previewCacheActiveWarmFrames.add(generationPromise)
-
-          try {
-            await generationPromise
-          } finally {
-            previewCacheActiveWarmFrames.delete(generationPromise)
-          }
-
-          if (runId !== previewCacheWarmRunId) {
-            return
-          }
-
-          previewCacheStatus = {
-            ...previewCacheStatus,
-            generatedFrames: previewCacheStatus.generatedFrames + 1,
-            pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
-            updatedAt: new Date().toISOString(),
-          }
-
-          await throttlePreviewCacheWarm(generationStartedAt, runId)
-        } catch (error) {
-          if (runId !== previewCacheWarmRunId) {
-            return
-          }
-
-          previewCacheStatus = {
-            ...previewCacheStatus,
-            failedFrames: previewCacheStatus.failedFrames + 1,
-            lastError: getErrorMessage(error),
-            pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
-            updatedAt: new Date().toISOString(),
-          }
-        }
-      },
+      runId,
     )
 
     if (runId !== previewCacheWarmRunId) {
@@ -874,16 +827,235 @@ function getPreviewCacheWarmStatusFields(mode: PreviewCacheWarmMode) {
 function getPreviewCacheWarmSettings(mode = previewCacheWarmMode) {
   if (mode === 'foreground') {
     return {
-      concurrency: PREVIEW_CACHE_FOREGROUND_WARM_CONCURRENCY,
+      batchFrameCount: PREVIEW_CACHE_FOREGROUND_BATCH_FRAME_COUNT,
       cpuBudget: PREVIEW_CACHE_FOREGROUND_CPU_BUDGET,
       ffmpegThreads: undefined,
     }
   }
 
   return {
-    concurrency: PREVIEW_CACHE_BACKGROUND_WARM_CONCURRENCY,
+    batchFrameCount: PREVIEW_CACHE_BACKGROUND_BATCH_FRAME_COUNT,
     cpuBudget: PREVIEW_CACHE_BACKGROUND_CPU_BUDGET,
     ffmpegThreads: PREVIEW_CACHE_BACKGROUND_FFMPEG_THREADS,
+  }
+}
+
+async function warmMissingPreviewFrames(
+  mediaId: string,
+  mediaPath: string,
+  stats: Stats,
+  frameTimes: number[],
+  missingFrameTimes: number[],
+  runId: number,
+) {
+  const settings = getPreviewCacheWarmSettings()
+  const frameIndexByTime = new Map(
+    frameTimes.map((frameTime, index) => [frameTime, index]),
+  )
+  const missingFrameIndexes = missingFrameTimes
+    .map((frameTime) => frameIndexByTime.get(frameTime))
+    .filter((index): index is number => index !== undefined)
+  const chunks = getPreviewCacheBatchChunks(
+    frameTimes,
+    missingFrameIndexes,
+    settings.batchFrameCount,
+  )
+
+  for (const chunk of chunks) {
+    if (runId !== previewCacheWarmRunId) {
+      return
+    }
+
+    const generationStartedAt = Date.now()
+
+    try {
+      await trackActivePreviewFrameWarm(
+        generatePreviewFrameBatch(
+          mediaId,
+          mediaPath,
+          stats,
+          frameTimes,
+          chunk,
+          PREVIEW_CACHE_QUALITY,
+          {
+            threads: settings.ffmpegThreads,
+          },
+        ).then(() => undefined),
+      )
+    } catch (error) {
+      await warmPreviewCacheFramesIndividually(
+        mediaId,
+        mediaPath,
+        stats,
+        frameTimes,
+        chunk.missingFrameIndexes,
+        runId,
+        getErrorMessage(error),
+      )
+      continue
+    }
+
+    const unresolvedFrameIndexes: number[] = []
+
+    for (const frameIndex of chunk.missingFrameIndexes) {
+      if (runId !== previewCacheWarmRunId) {
+        return
+      }
+
+      const framePath = getPreviewFramePath(
+        mediaId,
+        stats,
+        frameTimes[frameIndex],
+        PREVIEW_CACHE_QUALITY,
+      )
+
+      if (await isFile(framePath)) {
+        markPreviewCacheFrameGenerated()
+      } else {
+        unresolvedFrameIndexes.push(frameIndex)
+      }
+    }
+
+    if (unresolvedFrameIndexes.length > 0) {
+      await warmPreviewCacheFramesIndividually(
+        mediaId,
+        mediaPath,
+        stats,
+        frameTimes,
+        unresolvedFrameIndexes,
+        runId,
+        'Batch preview frame extraction missed expected frames',
+      )
+    }
+
+    await throttlePreviewCacheWarm(generationStartedAt, runId)
+  }
+}
+
+function getPreviewCacheBatchChunks(
+  frameTimes: number[],
+  missingFrameIndexes: number[],
+  batchFrameCount: number,
+) {
+  const chunks: {
+    frameTimes: number[]
+    missingFrameIndexes: number[]
+    startIndex: number
+  }[] = []
+  const safeBatchFrameCount = Number.isFinite(batchFrameCount)
+    ? Math.max(Math.floor(batchFrameCount), 1)
+    : frameTimes.length
+  let nextMissingIndex = 0
+
+  while (nextMissingIndex < missingFrameIndexes.length) {
+    const startIndex = missingFrameIndexes[nextMissingIndex]
+    const endIndex = Math.min(
+      startIndex + safeBatchFrameCount - 1,
+      frameTimes.length - 1,
+    )
+    const chunkMissingFrameIndexes: number[] = []
+
+    while (
+      nextMissingIndex < missingFrameIndexes.length &&
+      missingFrameIndexes[nextMissingIndex] <= endIndex
+    ) {
+      chunkMissingFrameIndexes.push(missingFrameIndexes[nextMissingIndex])
+      nextMissingIndex += 1
+    }
+
+    chunks.push({
+      frameTimes: frameTimes.slice(startIndex, endIndex + 1),
+      missingFrameIndexes: chunkMissingFrameIndexes,
+      startIndex,
+    })
+  }
+
+  return chunks
+}
+
+async function warmPreviewCacheFramesIndividually(
+  mediaId: string,
+  mediaPath: string,
+  stats: Stats,
+  frameTimes: number[],
+  frameIndexes: number[],
+  runId: number,
+  fallbackReason?: string,
+) {
+  const settings = getPreviewCacheWarmSettings()
+
+  for (const frameIndex of frameIndexes) {
+    if (runId !== previewCacheWarmRunId) {
+      return
+    }
+
+    const generationStartedAt = Date.now()
+
+    try {
+      await trackActivePreviewFrameWarm(
+        resolvePreviewFrame(
+          mediaId,
+          mediaPath,
+          stats,
+          frameTimes[frameIndex],
+          PREVIEW_CACHE_QUALITY,
+          {
+            threads: settings.ffmpegThreads,
+          },
+        ).then(() => undefined),
+      )
+
+      if (runId !== previewCacheWarmRunId) {
+        return
+      }
+
+      markPreviewCacheFrameGenerated()
+      await throttlePreviewCacheWarm(generationStartedAt, runId)
+    } catch (error) {
+      if (runId !== previewCacheWarmRunId) {
+        return
+      }
+
+      const message = fallbackReason
+        ? `${fallbackReason}; ${getErrorMessage(error)}`
+        : getErrorMessage(error)
+
+      markPreviewCacheFrameFailed(message)
+    }
+  }
+}
+
+async function trackActivePreviewFrameWarm<T>(promise: Promise<T>) {
+  const trackedPromise = promise.then(
+    () => undefined,
+    () => undefined,
+  )
+
+  previewCacheActiveWarmFrames.add(trackedPromise)
+
+  try {
+    return await promise
+  } finally {
+    previewCacheActiveWarmFrames.delete(trackedPromise)
+  }
+}
+
+function markPreviewCacheFrameGenerated() {
+  previewCacheStatus = {
+    ...previewCacheStatus,
+    generatedFrames: previewCacheStatus.generatedFrames + 1,
+    pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function markPreviewCacheFrameFailed(message: string) {
+  previewCacheStatus = {
+    ...previewCacheStatus,
+    failedFrames: previewCacheStatus.failedFrames + 1,
+    lastError: message,
+    pendingFrames: Math.max(previewCacheStatus.pendingFrames - 1, 0),
+    updatedAt: new Date().toISOString(),
   }
 }
 
@@ -920,25 +1092,6 @@ function getPreviewCacheFrameTimes(duration: number) {
   }
 
   return [...new Set(frameTimes)]
-}
-
-function runWithConcurrency<T>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T) => Promise<void>,
-) {
-  let nextIndex = 0
-  const workerCount = Math.min(Math.max(concurrency, 1), items.length)
-  const workers = Array.from({ length: workerCount }, async () => {
-    while (nextIndex < items.length) {
-      const item = items[nextIndex]
-
-      nextIndex += 1
-      await worker(item)
-    }
-  })
-
-  return Promise.all(workers)
 }
 
 function sleep(delayMs: number) {
@@ -1222,6 +1375,52 @@ async function resolvePreviewFrame(
   }
 }
 
+async function generatePreviewFrameBatch(
+  mediaId: string,
+  mediaPath: string,
+  stats: Stats,
+  frameTimes: number[],
+  chunk: {
+    frameTimes: number[]
+    startIndex: number
+  },
+  quality: PreviewFrameQuality,
+  options: PreviewFrameGenerationOptions = {},
+) {
+  const tempDirectory = await createPreviewFrameBatchTempDirectory()
+
+  try {
+    await extractPreviewFrameBatch(
+      mediaPath,
+      chunk.frameTimes[0],
+      chunk.frameTimes.length,
+      tempDirectory,
+      PREVIEW_FRAME_SETTINGS[quality],
+      options,
+    )
+
+    for (let offset = 0; offset < chunk.frameTimes.length; offset += 1) {
+      const tempPath = getPreviewFrameBatchTempPath(tempDirectory, offset)
+
+      if (!(await isFile(tempPath))) {
+        continue
+      }
+
+      const frameIndex = chunk.startIndex + offset
+      const framePath = getPreviewFramePath(
+        mediaId,
+        stats,
+        frameTimes[frameIndex],
+        quality,
+      )
+
+      await movePreviewFrameIntoCache(tempPath, framePath)
+    }
+  } finally {
+    await fs.rm(tempDirectory, { force: true, recursive: true })
+  }
+}
+
 async function generatePreviewFrame(
   mediaPath: string,
   framePath: string,
@@ -1243,6 +1442,34 @@ async function generatePreviewFrame(
   await fs.rename(tempPath, framePath)
 
   return framePath
+}
+
+async function createPreviewFrameBatchTempDirectory() {
+  const cacheRoot = getPreviewFrameCacheRoot()
+
+  await fs.mkdir(cacheRoot, { recursive: true })
+
+  return fs.mkdtemp(join(cacheRoot, 'batch-'))
+}
+
+async function movePreviewFrameIntoCache(tempPath: string, framePath: string) {
+  if (await isFile(framePath)) {
+    await fs.rm(tempPath, { force: true })
+    return
+  }
+
+  await fs.mkdir(dirname(framePath), { recursive: true })
+
+  try {
+    await fs.rename(tempPath, framePath)
+  } catch (error) {
+    if (await isFile(framePath)) {
+      await fs.rm(tempPath, { force: true })
+      return
+    }
+
+    throw error
+  }
 }
 
 function extractPreviewFrame(
@@ -1352,6 +1579,114 @@ function extractPreviewFrame(
       finish(new Error(message))
     })
   })
+}
+
+function extractPreviewFrameBatch(
+  mediaPath: string,
+  startTime: number,
+  frameCount: number,
+  outputDirectory: string,
+  settings: (typeof PREVIEW_FRAME_SETTINGS)[PreviewFrameQuality],
+  options: PreviewFrameGenerationOptions = {},
+) {
+  return new Promise<void>((resolvePromise, rejectPromise) => {
+    const threadArgs = options.threads
+      ? ['-threads', String(options.threads)]
+      : []
+    const ffmpeg = spawn(
+      getFfmpegExecutable(),
+      [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-ss',
+        formatFfmpegTime(startTime),
+        ...(settings.fastSeek ? ['-noaccurate_seek'] : []),
+        ...threadArgs,
+        '-i',
+        mediaPath,
+        '-map',
+        '0:v:0',
+        '-an',
+        '-sn',
+        '-dn',
+        '-vf',
+        `fps=1/${PREVIEW_CACHE_FRAME_INTERVAL_SECONDS},scale=${settings.width}:-2`,
+        '-frames:v',
+        String(frameCount),
+        '-q:v',
+        String(settings.jpegQuality),
+        ...threadArgs,
+        '-start_number',
+        '0',
+        '-f',
+        'image2',
+        join(outputDirectory, '%06d.jpg'),
+      ],
+      {
+        windowsHide: true,
+      },
+    )
+    const errorChunks: Buffer[] = []
+    let settled = false
+    const timeout = setTimeout(() => {
+      finish(new Error('Preview frame batch generation timed out'))
+      ffmpeg.kill()
+    }, getPreviewFrameBatchTimeout(frameCount))
+
+    function finish(error?: Error) {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      clearTimeout(timeout)
+
+      if (error) {
+        rejectPromise(error)
+        return
+      }
+
+      resolvePromise()
+    }
+
+    ffmpeg.stderr.on('data', (chunk: Buffer) => {
+      errorChunks.push(chunk)
+    })
+
+    ffmpeg.on('error', (error) => {
+      finish(error)
+    })
+
+    ffmpeg.on('close', (code) => {
+      if (settled) {
+        return
+      }
+
+      if (code === 0) {
+        finish()
+        return
+      }
+
+      const stderr = Buffer.concat(errorChunks).toString('utf8').trim()
+      const message = stderr
+        ? `Preview frame batch generation failed: ${stderr}`
+        : `Preview frame batch generation failed (${code ?? 'unknown exit'})`
+
+      finish(new Error(message))
+    })
+  })
+}
+
+function getPreviewFrameBatchTimeout(frameCount: number) {
+  return Math.min(
+    PREVIEW_FRAME_BATCH_MAX_TIMEOUT_MS,
+    PREVIEW_FRAME_TIMEOUT_MS + frameCount * PREVIEW_FRAME_BATCH_TIMEOUT_MS_PER_FRAME,
+  )
+}
+
+function getPreviewFrameBatchTempPath(directory: string, frameIndex: number) {
+  return join(directory, `${String(frameIndex).padStart(6, '0')}.jpg`)
 }
 
 function getPreviewFrameQuality(value: string | null): PreviewFrameQuality {
