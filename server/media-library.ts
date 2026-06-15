@@ -200,7 +200,7 @@ type TmdbSearchResponse = {
 }
 
 const DEFAULT_MEDIA_ROOT = 'F:/media'
-const ARTWORK_CACHE_DIRECTORY_NAME = 'Home Media'
+const ARTWORK_CACHE_DIRECTORY_NAME = 'My Home Media Server'
 const PREVIEW_FRAME_CACHE_DIRECTORY_NAME = 'preview-frames'
 const VIDEO_EXTENSIONS = new Set([
   '.avi',
@@ -316,7 +316,7 @@ export function getArtworkCacheRoot() {
 
   return localAppData
     ? resolve(localAppData, ARTWORK_CACHE_DIRECTORY_NAME, 'artwork')
-    : resolve(homedir(), '.home-media', 'artwork')
+    : resolve(homedir(), '.my-home-media-server', 'artwork')
 }
 
 export function getPreviewFrameCacheRoot() {
@@ -334,7 +334,11 @@ export function getPreviewFrameCacheRoot() {
         ARTWORK_CACHE_DIRECTORY_NAME,
         PREVIEW_FRAME_CACHE_DIRECTORY_NAME,
       )
-    : resolve(homedir(), '.home-media', PREVIEW_FRAME_CACHE_DIRECTORY_NAME)
+    : resolve(
+        homedir(),
+        '.my-home-media-server',
+        PREVIEW_FRAME_CACHE_DIRECTORY_NAME,
+      )
 }
 
 export async function scanMediaLibrary(
@@ -385,7 +389,7 @@ export async function handleMediaApi(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<boolean> {
-  const url = new URL(req.url ?? '/', 'http://home-media.local')
+  const url = new URL(req.url ?? '/', 'http://my-home-media-server.local')
   const isApiPath =
     url.pathname === '/api/library' ||
     url.pathname === '/api/playback' ||

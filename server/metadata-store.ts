@@ -17,7 +17,8 @@ type MetadataStore = {
   version: 1
 }
 
-const METADATA_DIRECTORY_NAME = 'Home Media'
+const METADATA_DIRECTORY_NAME = 'My Home Media Server'
+const LEGACY_METADATA_DIRECTORY_NAME = 'Home Media'
 const METADATA_FILE_NAME = 'metadata.json'
 
 let metadataWriteQueue = Promise.resolve()
@@ -33,7 +34,7 @@ export function getMetadataStorePath() {
 
   return localAppData
     ? resolve(localAppData, METADATA_DIRECTORY_NAME, METADATA_FILE_NAME)
-    : resolve(homedir(), '.home-media', METADATA_FILE_NAME)
+    : resolve(homedir(), '.my-home-media-server', METADATA_FILE_NAME)
 }
 
 export async function readPlaybackHistory() {
@@ -116,15 +117,41 @@ function queueMetadataWrite<T>(operation: () => Promise<T>) {
 }
 
 async function readMetadataStore(): Promise<MetadataStore> {
+  const storePath = getMetadataStorePath()
+
   try {
-    const payload = JSON.parse(
-      await fs.readFile(getMetadataStorePath(), 'utf8'),
-    ) as unknown
+    const payload = JSON.parse(await fs.readFile(storePath, 'utf8')) as unknown
 
     return normalizeMetadataStore(payload)
   } catch {
+    const fallbackPath = getLegacyMetadataStorePath()
+
+    if (fallbackPath && fallbackPath !== storePath) {
+      try {
+        const payload = JSON.parse(
+          await fs.readFile(fallbackPath, 'utf8'),
+        ) as unknown
+
+        return normalizeMetadataStore(payload)
+      } catch {
+        return createEmptyMetadataStore()
+      }
+    }
+
     return createEmptyMetadataStore()
   }
+}
+
+function getLegacyMetadataStorePath() {
+  if (process.env.HOME_MEDIA_METADATA_PATH?.trim()) {
+    return null
+  }
+
+  const localAppData = process.env.LOCALAPPDATA?.trim()
+
+  return localAppData
+    ? resolve(localAppData, LEGACY_METADATA_DIRECTORY_NAME, METADATA_FILE_NAME)
+    : resolve(homedir(), '.home-media', METADATA_FILE_NAME)
 }
 
 async function writeMetadataStore(store: MetadataStore) {

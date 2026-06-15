@@ -155,13 +155,14 @@ type StatItem = {
   icon: LucideIcon
 }
 
-type HomeMediaWindow = Window & {
+type MyHomeMediaServerWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
   }
 }
 
-const apiBaseStorageKey = 'home-media-api-base-v1'
+const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
+const legacyApiBaseStorageKey = 'home-media-api-base-v1'
 const viewModes: ViewMode[] = ['Home', 'Movies', 'TV Shows']
 
 async function fetchLibrary(
@@ -286,8 +287,10 @@ function App() {
   useEffect(() => {
     if (apiBase) {
       window.localStorage.setItem(apiBaseStorageKey, apiBase)
+      window.localStorage.removeItem(legacyApiBaseStorageKey)
     } else {
       window.localStorage.removeItem(apiBaseStorageKey)
+      window.localStorage.removeItem(legacyApiBaseStorageKey)
     }
   }, [apiBase])
 
@@ -648,7 +651,7 @@ function App() {
           </div>
           <div>
             <p className="eyebrow">Local server</p>
-            <h1>Home Media</h1>
+            <h1>My Home Media Server</h1>
           </div>
         </div>
 
@@ -1260,7 +1263,9 @@ function readInitialApiBase() {
   try {
     const params = new URLSearchParams(window.location.search)
     const queryApiBase = params.get('api') ?? params.get('server')
-    const storedApiBase = window.localStorage.getItem(apiBaseStorageKey)
+    const storedApiBase =
+      window.localStorage.getItem(apiBaseStorageKey) ??
+      window.localStorage.getItem(legacyApiBaseStorageKey)
 
     return normalizeApiBase(
       queryApiBase ??
@@ -1276,7 +1281,7 @@ function readInitialApiBase() {
 }
 
 function getRuntimeApiBase() {
-  return (window as HomeMediaWindow).HOME_MEDIA_CONFIG?.apiBase
+  return (window as MyHomeMediaServerWindow).HOME_MEDIA_CONFIG?.apiBase
 }
 
 function normalizeApiBase(value: string | null | undefined) {

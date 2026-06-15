@@ -1,12 +1,12 @@
 # Samsung TV Prototype
 
-This repo can build a first-pass Samsung TV app as a packaged Tizen Web app. The TV app is static, and it talks back to the Home Media server running on your PC over the LAN.
+This repo can build a first-pass Samsung TV app as a packaged Tizen Web app. The TV app is static, and it talks back to My Home Media Server, an opinionated media server tuned for responsive local browsing and playback over the LAN.
 
 ## What Was Added
 
 - `tv.html`, `src/tv-main.tsx`, and `src/TvApp.tsx` provide a dedicated remote-first TV UI.
 - `public/config.xml` is copied into `dist/` so Tizen tooling can package the Vite build as a `.wgt`.
-- `public/home-media-config.js` sets the desktop media server URL used by the packaged TV app.
+- `public/home-media-config.js` sets the desktop My Home Media Server URL used by the packaged TV app.
 - `public/tizen-icon.png` provides a bitmap launcher icon for the Tizen package.
 - `npm run build:tv` builds with relative asset paths for the packaged TV runtime.
 - `npm run preview:lan` serves the built app and `/api/*` media endpoints on the local network.
@@ -27,7 +27,7 @@ Tizen Studio still appears in Samsung TV docs, but Samsung's current Tizen SDK 1
 
 ## 1. Start The LAN Server
 
-Find the IPv4 address of the PC that will run Home Media:
+Find the IPv4 address of the PC that will run My Home Media Server:
 
 ```powershell
 ipconfig
@@ -119,13 +119,13 @@ tizen package -t wgt -s <certificate-profile-name> -- F:\projects\home-media\dis
 sdb connect <tv-ip>:26101
 sdb devices
 tizen install -s <device-serial> --name <generated-package>.wgt -- F:\projects\home-media\dist
-tizen run -s <device-serial> -p HMedia0001.HomeMedia
+tizen run -s <device-serial> -p MHMServer1.MyHomeMediaServer
 ```
 
 The package/application ID used by this prototype is:
 
 ```text
-HMedia0001.HomeMedia
+MHMServer1.MyHomeMediaServer
 ```
 
 ## 5. Configure The Server URL On TV

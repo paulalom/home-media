@@ -1,6 +1,6 @@
-# Home Media
+# My Home Media Server
 
-Home Media is a new local-first media server project intended to replace a Plex-style workflow with an app owned by this repository.
+My Home Media Server is an opinionated, local-first media server focused on responsiveness: fast library scans, quick playback handoff, and browser/TV interfaces that stay snappy while the server handles media work.
 
 ## Current Shape
 
@@ -38,4 +38,4 @@ This repo includes a Tizen Web app prototype path for Samsung TVs. See [docs/sam
 
 The project currently defaults to `F:/media`. Set `HOME_MEDIA_ROOT` before starting Vite to point the scanner at another folder.
 
-Playback metadata is stored outside the repository by default at `%LOCALAPPDATA%/Home Media/metadata.json` on Windows, or `~/.home-media/metadata.json` when no local app data directory is available. Set `HOME_MEDIA_METADATA_PATH` to choose a different JSON file. If you point it into this repo, use `.home-media/metadata.json` or `home-media-data/metadata.json`; both folders are ignored by git.
+Playback metadata is stored outside the repository by default at `%LOCALAPPDATA%/My Home Media Server/metadata.json` on Windows, or `~/.my-home-media-server/metadata.json` when no local app data directory is available. Set `HOME_MEDIA_METADATA_PATH` to choose a different JSON file. If you point it into this repo, use `.my-home-media-server/metadata.json` or `my-home-media-server-data/metadata.json`; both folders are ignored by git.

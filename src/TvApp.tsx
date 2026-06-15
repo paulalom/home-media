@@ -165,7 +165,7 @@ type ActionMenuEntry = {
   label: string
 }
 
-type HomeMediaWindow = Window & {
+type MyHomeMediaServerWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
   }
@@ -177,7 +177,8 @@ type HomeMediaWindow = Window & {
   }
 }
 
-const apiBaseStorageKey = 'home-media-api-base-v1'
+const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
+const legacyApiBaseStorageKey = 'home-media-api-base-v1'
 const maxRowItems = 28
 const playerHudHideDelayMs = 1000
 const playerSeekStepSeconds = 5
@@ -1969,7 +1970,7 @@ function TvApp() {
     <main className="tv-shell">
       <header className="tv-topbar">
         <div>
-          <p>Home Media</p>
+          <p>My Home Media Server</p>
           <h1>{selectedTitle?.title ?? 'Loading library'}</h1>
         </div>
         <div className="tv-status">
@@ -1997,7 +1998,7 @@ function TvApp() {
               ? getTitleSubtitle(selectedTitle, selectedTitleIsContinue)
               : 'Preparing your media'}
           </p>
-          <h2>{selectedTitle?.title ?? 'Home Media'}</h2>
+          <h2>{selectedTitle?.title ?? 'My Home Media Server'}</h2>
           <div className="tv-hero-meta">
             <span>{selectedItem?.container ?? '...'}</span>
             <span>{selectedTitle?.source ?? 'Server'}</span>
@@ -2366,7 +2367,7 @@ function getRemoteAction(event: KeyboardEvent): RemoteAction | null {
 }
 
 function registerSamsungRemoteKeys() {
-  const tvInputDevice = (window as HomeMediaWindow).tizen?.tvinputdevice
+  const tvInputDevice = (window as MyHomeMediaServerWindow).tizen?.tvinputdevice
 
   try {
     if (tvInputDevice?.registerKeyBatch) {
@@ -2390,8 +2391,11 @@ function readInitialApiBase() {
   try {
     const params = new URLSearchParams(window.location.search)
     const queryApiBase = params.get('api') ?? params.get('server')
-    const runtimeApiBase = (window as HomeMediaWindow).HOME_MEDIA_CONFIG?.apiBase
-    const storedApiBase = window.localStorage.getItem(apiBaseStorageKey)
+    const runtimeApiBase = (window as MyHomeMediaServerWindow).HOME_MEDIA_CONFIG
+      ?.apiBase
+    const storedApiBase =
+      window.localStorage.getItem(apiBaseStorageKey) ??
+      window.localStorage.getItem(legacyApiBaseStorageKey)
 
     return normalizeApiBase(
       queryApiBase ??

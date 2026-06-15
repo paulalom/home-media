@@ -7,11 +7,14 @@ export type PlaybackRecord = {
 
 export type PlaybackHistory = Record<string, PlaybackRecord>
 
-export const playbackStorageKey = 'home-media-playback-v1'
+export const playbackStorageKey = 'my-home-media-server-playback-v1'
+const legacyPlaybackStorageKey = 'home-media-playback-v1'
 
 export function readLocalPlaybackHistory(): PlaybackHistory {
   try {
-    const value = window.localStorage.getItem(playbackStorageKey)
+    const value =
+      window.localStorage.getItem(playbackStorageKey) ??
+      window.localStorage.getItem(legacyPlaybackStorageKey)
 
     return value ? normalizePlaybackHistory(JSON.parse(value)) : {}
   } catch {
@@ -21,6 +24,7 @@ export function readLocalPlaybackHistory(): PlaybackHistory {
 
 export function writeLocalPlaybackHistory(history: PlaybackHistory) {
   window.localStorage.setItem(playbackStorageKey, JSON.stringify(history))
+  window.localStorage.removeItem(legacyPlaybackStorageKey)
 }
 
 export async function fetchPlaybackHistory(

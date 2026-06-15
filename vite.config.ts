@@ -7,7 +7,7 @@ import { handleMediaApi } from './server/media-library'
 
 function mediaApiPlugin(): Plugin {
   return {
-    name: 'home-media-api',
+    name: 'my-home-media-server-api',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         void handleMediaApi(req, res)

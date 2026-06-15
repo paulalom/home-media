@@ -12,8 +12,10 @@ dist
 dist-ssr
 *.local
 
-# Local Home Media runtime data
+# Local My Home Media Server runtime data
+.my-home-media-server/
 .home-media/
+my-home-media-server-data/
 home-media-data/
 
 # Editor directories and files
