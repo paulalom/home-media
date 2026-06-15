@@ -1992,7 +1992,11 @@ function TvApp() {
           <span>{selectedTitle?.kind === 'show' ? 'TV' : 'MOVIE'}</span>
         </div>
         <div className="tv-hero-copy">
-          <p>{selectedTitle?.subtitle ?? 'Preparing your media'}</p>
+          <p>
+            {selectedTitle
+              ? getTitleSubtitle(selectedTitle, selectedTitleIsContinue)
+              : 'Preparing your media'}
+          </p>
           <h2>{selectedTitle?.title ?? 'Home Media'}</h2>
           <div className="tv-hero-meta">
             <span>{selectedItem?.container ?? '...'}</span>
@@ -2074,7 +2078,9 @@ function TvApp() {
                         ) : null}
                         <span>{title.kind === 'show' ? 'TV' : 'Movie'}</span>
                         <strong>{title.title}</strong>
-                        <p>{title.subtitle}</p>
+                        <p>
+                          {getTitleSubtitle(title, section.id === 'continue')}
+                        </p>
                         {playback && playback.duration > 0 ? (
                           <div className="tv-progress" aria-hidden="true">
                             <i
@@ -2096,7 +2102,7 @@ function TvApp() {
           })}
         </section>
       ) : (
-        <section className="tv-loading">No playable titles found</section>
+        <section className="tv-loading">No titles found</section>
       )}
     </main>
   )
@@ -2106,9 +2112,7 @@ function buildTvSections(
   items: MediaItem[],
   history: PlaybackHistory,
 ): TvSection[] {
-  const titles = buildTvTitles(items, history).filter((title) =>
-    Boolean(title.resumeItem.browserPlayable),
-  )
+  const titles = buildTvTitles(items, history)
   const continueTitles = titles
     .filter((title) => title.lastWatchedAt)
     .sort(sortByLastWatched)
@@ -2695,6 +2699,18 @@ function getPrimaryActionLabel(
   }
 
   return actionLabel
+}
+
+function getTitleSubtitle(title: TvTitle, isContinue: boolean) {
+  if (!isContinue || title.kind !== 'show') {
+    return title.subtitle
+  }
+
+  const episodeNumber = title.resumeItem.episodeNumber
+
+  return typeof episodeNumber === 'number'
+    ? `Episode ${episodeNumber}`
+    : title.subtitle
 }
 
 function getDefaultDetailItemIndex(title: TvTitle, history: PlaybackHistory) {

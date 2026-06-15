@@ -2917,8 +2917,15 @@ function getMovieTitle(
 
 function parseEpisodeNumbers(filename: string) {
   const match =
-    /\bS(?<season>\d{1,2})E(?<episode>\d{1,3})\b/i.exec(filename) ??
-    /\b(?<season>\d{1,2})x(?<episode>\d{1,3})\b/i.exec(filename)
+    /\b(?<marker>S(?<season>\d{1,2})E(?<episode>\d{1,3}))\b/i.exec(
+      filename,
+    ) ??
+    /\b(?<marker>(?<season>\d{1,2})x(?<episode>\d{1,3}))\b/i.exec(
+      filename,
+    ) ??
+    /(?:^|[.\s_-])(?<marker>(?<season>\d)(?<episode>\d{2}))(?:[.\s_-]|$)/i.exec(
+      filename,
+    )
 
   if (!match?.groups) {
     return null
@@ -2926,6 +2933,7 @@ function parseEpisodeNumbers(filename: string) {
 
   return {
     episodeNumber: Number(match.groups.episode),
+    marker: match.groups.marker,
     seasonNumber: Number(match.groups.season),
   }
 }
@@ -2940,8 +2948,21 @@ function getEpisodeTitle(
     .replace(new RegExp(`^${escapeRegExp(showTitle)}\\s*`, 'i'), '')
     .replace(/\bS\d{1,2}E\d{1,3}\b/i, '')
     .replace(/\b\d{1,2}x\d{1,3}\b/i, '')
+    .replace(
+      episodeNumbers?.marker
+        ? new RegExp(
+            `(?:^|[\\s._-])${escapeRegExp(
+              episodeNumbers.marker,
+            )}(?:[\\s._-]|$)`,
+            'i',
+          )
+        : /$^/,
+      ' ',
+    )
     .replace(/\b\d{3,4}p\b.*$/i, '')
     .replace(/\b(?:BluRay|WEBRip|WEB-DL|x264|x265|HEVC|AAC|DD5)\b.*$/i, '')
+    .replace(/^(?:-\s*)+/, '')
+    .replace(/(?:\s*-)+$/, '')
     .replace(/\s+/g, ' ')
     .trim()
 
