@@ -8,9 +8,15 @@ import {
 } from 'react'
 import {
   AlertCircle,
+  ArrowUp,
+  ChevronRight,
   Clapperboard,
   Database,
+  Download,
+  File as FileIcon,
   FileVideo,
+  Folder,
+  FolderOpen,
   LayoutGrid,
   LoaderCircle,
   Maximize2,
@@ -37,7 +43,8 @@ import {
 import './App.css'
 
 type MediaCategory = 'movie' | 'show' | 'other'
-type ViewMode = 'Home' | 'Movies' | 'TV Shows'
+type MediaViewMode = 'Home' | 'Movies' | 'TV Shows'
+type ViewMode = MediaViewMode | 'Files'
 
 type MediaItem = {
   id: string
@@ -79,6 +86,31 @@ type LibraryResponse = {
   }
   sources: SourceSummary[]
   items: MediaItem[]
+}
+
+type FileShareEntry = {
+  id: string
+  name: string
+  kind: 'directory' | 'file'
+  relativePath: string
+  sizeBytes: number
+  sizeLabel: string
+  modifiedAt: string
+  downloadUrl?: string
+}
+
+type FileShareResponse = {
+  summary: {
+    root: string
+    relativePath: string
+    parentPath: string | null
+    scannedAt: string
+    directories: number
+    files: number
+    totalBytes: number
+    sizeLabel: string
+  }
+  entries: FileShareEntry[]
 }
 
 type PreviewCacheStatus = {
@@ -146,7 +178,7 @@ type NavItem = {
   label: string
   count: string
   icon: LucideIcon
-  mode: ViewMode
+  mode: MediaViewMode
 }
 
 type StatItem = {
@@ -163,7 +195,7 @@ type MyHomeMediaServerWindow = Window & {
 
 const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
-const viewModes: ViewMode[] = ['Home', 'Movies', 'TV Shows']
+const viewModes: MediaViewMode[] = ['Home', 'Movies', 'TV Shows']
 
 async function fetchLibrary(
   apiBase: string,
@@ -183,6 +215,36 @@ async function fetchLibrary(
   }
 
   return (await response.json()) as LibraryResponse
+}
+
+async function fetchFileShare(
+  apiBase: string,
+  path: string,
+  signal?: AbortSignal,
+) {
+  const searchParams = new URLSearchParams()
+
+  if (path) {
+    searchParams.set('path', path)
+  }
+
+  const queryString = searchParams.toString()
+  const response = await fetch(
+    buildApiUrl(
+      `/api/files${queryString ? `?${queryString}` : ''}`,
+      apiBase,
+    ),
+    {
+      cache: 'no-store',
+      signal,
+    },
+  )
+
+  if (!response.ok) {
+    throw new Error(`File list failed (${response.status})`)
+  }
+
+  return (await response.json()) as FileShareResponse
 }
 
 async function fetchPreviewCacheStatus(
@@ -232,6 +294,12 @@ function App() {
   const [apiBaseDraft, setApiBaseDraft] = useState(apiBase)
   const [activeView, setActiveView] = useState<ViewMode>('Home')
   const [error, setError] = useState<string | null>(null)
+  const [fileError, setFileError] = useState<string | null>(null)
+  const [filePath, setFilePath] = useState('')
+  const [fileQuery, setFileQuery] = useState('')
+  const [fileReloadKey, setFileReloadKey] = useState(0)
+  const [fileShare, setFileShare] = useState<FileShareResponse | null>(null)
+  const [filesLoading, setFilesLoading] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [library, setLibrary] = useState<LibraryResponse | null>(null)
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
@@ -241,7 +309,7 @@ function App() {
     useState(false)
   const [previewCacheStatus, setPreviewCacheStatus] =
     useState<PreviewCacheStatus | null>(null)
-  const [query, setQuery] = useState('')
+  const [mediaQuery, setMediaQuery] = useState('')
   const [scanRunning, setScanRunning] = useState(false)
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(
     null,
@@ -329,6 +397,40 @@ function App() {
   }, [apiBase])
 
   useEffect(() => {
+    if (activeView !== 'Files') {
+      return
+    }
+
+    const controller = new AbortController()
+
+    void Promise.resolve().then(() => {
+      if (!controller.signal.aborted) {
+        setFilesLoading(true)
+        setFileError(null)
+      }
+    })
+
+    fetchFileShare(apiBase, filePath, controller.signal)
+      .then((nextFileShare) => {
+        if (!controller.signal.aborted) {
+          setFileShare(nextFileShare)
+        }
+      })
+      .catch((requestError: unknown) => {
+        if (!controller.signal.aborted) {
+          setFileError(getErrorMessage(requestError))
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setFilesLoading(false)
+        }
+      })
+
+    return () => controller.abort()
+  }, [activeView, apiBase, filePath, fileReloadKey])
+
+  useEffect(() => {
     if (!showSettings) {
       return
     }
@@ -410,7 +512,15 @@ function App() {
   const selectedPlayback = selectedItem
     ? playbackHistory[selectedItem.id] ?? null
     : null
-  const visibleTitles = getTitlesForView(collections, activeView, query)
+  const visibleTitles =
+    activeView === 'Files'
+      ? []
+      : getTitlesForView(collections, activeView, mediaQuery)
+  const visibleFileEntries = filterFileEntries(
+    fileShare?.entries ?? [],
+    fileQuery,
+  )
+  const currentError = activeView === 'Files' ? fileError : error
   const titleOptions =
     selectedTitle &&
     !visibleTitles.some((title) => title.id === selectedTitle.id)
@@ -511,10 +621,10 @@ function App() {
     setSelectedEpisodeId(episode.id)
   }
 
-  function changeView(nextView: ViewMode) {
+  function changeView(nextView: MediaViewMode) {
     setActiveView(nextView)
 
-    const nextTitle = getTitlesForView(collections, nextView, query)[0]
+    const nextTitle = getTitlesForView(collections, nextView, mediaQuery)[0]
 
     if (nextTitle) {
       selectTitle(nextTitle)
@@ -523,16 +633,41 @@ function App() {
     }
   }
 
-  function changeQuery(nextQuery: string) {
-    setQuery(nextQuery)
+  function openFileView() {
+    if (activeView === 'Files') {
+      refreshFileShare()
+      return
+    }
 
-    const nextTitle = getTitlesForView(collections, activeView, nextQuery)[0]
+    setFilesLoading(true)
+    setFileError(null)
+    setActiveView('Files')
+  }
+
+  function changeMediaQuery(nextQuery: string) {
+    setMediaQuery(nextQuery)
+
+    const currentMediaView = activeView === 'Files' ? 'Home' : activeView
+    const nextTitle = getTitlesForView(collections, currentMediaView, nextQuery)[0]
 
     if (nextTitle) {
       selectTitle(nextTitle)
     } else if (nextQuery.trim()) {
       selectTitle(null)
     }
+  }
+
+  function openFileDirectory(nextPath: string) {
+    setFilesLoading(true)
+    setFileError(null)
+    setFilePath(nextPath)
+    setFileQuery('')
+  }
+
+  function refreshFileShare() {
+    setFilesLoading(true)
+    setFileError(null)
+    setFileReloadKey((currentKey) => currentKey + 1)
   }
 
   function selectTitleById(titleId: string) {
@@ -677,13 +812,31 @@ function App() {
           })}
         </nav>
 
+        <div className="utility-nav" aria-label="Utility navigation">
+          <button
+            className={activeView === 'Files' ? 'nav-item active' : 'nav-item'}
+            onClick={openFileView}
+            title="Files"
+            type="button"
+          >
+            <FolderOpen size={18} />
+            <span>Files</span>
+          </button>
+        </div>
+
         <div className="server-card">
           <div className="server-icon">
             <Server size={20} />
           </div>
           <div>
-            <p className="muted">Source</p>
-            <strong>{library?.summary.root ?? 'F:/media'}</strong>
+            <p className="muted">
+              {activeView === 'Files' ? 'File root' : 'Source'}
+            </p>
+            <strong>
+              {activeView === 'Files'
+                ? fileShare?.summary.root ?? 'Desktop'
+                : library?.summary.root ?? 'F:/media'}
+            </strong>
           </div>
           <span className="status-dot" aria-label="Online" />
         </div>
@@ -694,10 +847,14 @@ function App() {
           <div className="search-box">
             <Search size={18} />
             <input
-              aria-label="Search library"
-              onChange={(event) => changeQuery(event.target.value)}
-              placeholder="Search titles"
-              value={query}
+              aria-label={activeView === 'Files' ? 'Search files' : 'Search library'}
+              onChange={(event) =>
+                activeView === 'Files'
+                  ? setFileQuery(event.target.value)
+                  : changeMediaQuery(event.target.value)
+              }
+              placeholder={activeView === 'Files' ? 'Search files' : 'Search titles'}
+              value={activeView === 'Files' ? fileQuery : mediaQuery}
             />
           </div>
           <div className="topbar-actions">
@@ -712,15 +869,27 @@ function App() {
             >
               <Settings size={19} />
             </button>
-            <button
-              className="primary-button"
-              disabled={scanRunning}
-              onClick={startScan}
-              type="button"
-            >
-              <RefreshCcw size={18} />
-              {scanRunning ? 'Scanning' : 'Scan'}
-            </button>
+            {activeView === 'Files' ? (
+              <button
+                className="primary-button"
+                disabled={filesLoading}
+                onClick={refreshFileShare}
+                type="button"
+              >
+                <RefreshCcw size={18} />
+                {filesLoading ? 'Loading' : 'Refresh'}
+              </button>
+            ) : (
+              <button
+                className="primary-button"
+                disabled={scanRunning}
+                onClick={startScan}
+                type="button"
+              >
+                <RefreshCcw size={18} />
+                {scanRunning ? 'Scanning' : 'Scan'}
+              </button>
+            )}
             {showSettings ? (
               <form className="server-settings" onSubmit={saveApiSettings}>
                 <label htmlFor="server-url">Server URL</label>
@@ -814,30 +983,128 @@ function App() {
           </div>
         </header>
 
-        {error ? (
+        {currentError ? (
           <section className="error-banner" role="alert">
             <AlertCircle size={18} />
             <span>
-              {error}. Server: {apiBase || 'this host'}
+              {currentError}. Server: {apiBase || 'this host'}
             </span>
           </section>
         ) : null}
 
-        <section className="stat-grid" aria-label="Library status">
-          {libraryStats.map((stat) => {
-            const Icon = stat.icon
+        {activeView === 'Files' ? null : (
+          <section className="stat-grid" aria-label="Library status">
+            {libraryStats.map((stat) => {
+              const Icon = stat.icon
 
-            return (
-              <article className="stat-card" key={stat.label}>
-                <Icon size={18} />
-                <span>{stat.label}</span>
-                <strong>{isLoading ? '...' : stat.value}</strong>
-              </article>
-            )
-          })}
-        </section>
+              return (
+                <article className="stat-card" key={stat.label}>
+                  <Icon size={18} />
+                  <span>{stat.label}</span>
+                  <strong>{isLoading ? '...' : stat.value}</strong>
+                </article>
+              )
+            })}
+          </section>
+        )}
 
         <section className="content-layout">
+          {activeView === 'Files' ? (
+            <section className="file-panel" aria-labelledby="files-heading">
+              <div className="panel-heading file-heading">
+                <div>
+                  <p className="eyebrow">
+                    {fileShare
+                      ? `Scanned ${formatScanTime(fileShare.summary.scannedAt)}`
+                      : 'Shared files'}
+                  </p>
+                  <h2 id="files-heading">Files</h2>
+                </div>
+                <div className="file-summary">
+                  {filesLoading ? (
+                    <LoaderCircle className="spin" size={16} />
+                  ) : null}
+                  <span>
+                    {formatNumber(fileShare?.summary.directories ?? 0)} folders
+                  </span>
+                  <span>{formatNumber(fileShare?.summary.files ?? 0)} files</span>
+                  <strong>{fileShare?.summary.sizeLabel ?? '0 B'}</strong>
+                </div>
+              </div>
+
+              <div className="file-breadcrumb" aria-label="Current folder">
+                <button
+                  className="secondary-button subtle"
+                  disabled={!fileShare || !fileShare.summary.relativePath}
+                  onClick={() =>
+                    openFileDirectory(fileShare?.summary.parentPath ?? '')
+                  }
+                  type="button"
+                >
+                  <ArrowUp size={16} />
+                  Up
+                </button>
+                <span title={fileShare?.summary.root}>
+                  {getFileDirectoryLabel(fileShare)}
+                </span>
+              </div>
+
+              {filesLoading && !fileShare ? (
+                <div className="empty-state">
+                  <LoaderCircle className="spin" size={28} />
+                  <p>Loading files</p>
+                </div>
+              ) : visibleFileEntries.length ? (
+                <div className="file-list">
+                  {visibleFileEntries.map((entry) =>
+                    entry.kind === 'directory' ? (
+                      <button
+                        className="file-row directory"
+                        key={entry.id}
+                        onClick={() => openFileDirectory(entry.relativePath)}
+                        title={entry.relativePath}
+                        type="button"
+                      >
+                        <Folder className="file-row-icon" size={22} />
+                        <span className="file-name">
+                          <strong>{entry.name}</strong>
+                          <span>{formatFileModifiedTime(entry.modifiedAt)}</span>
+                        </span>
+                        <span className="file-meta">Folder</span>
+                        <ChevronRight size={18} />
+                      </button>
+                    ) : (
+                      <a
+                        className="file-row"
+                        download
+                        href={resolveFileDownloadUrl(entry, apiBase)}
+                        key={entry.id}
+                        title={entry.relativePath}
+                      >
+                        <FileIcon className="file-row-icon" size={22} />
+                        <span className="file-name">
+                          <strong>{entry.name}</strong>
+                          <span>{entry.relativePath}</span>
+                        </span>
+                        <span className="file-meta">
+                          <span>{entry.sizeLabel}</span>
+                          <span className="file-modified">
+                            {formatFileModifiedTime(entry.modifiedAt)}
+                          </span>
+                        </span>
+                        <Download size={18} />
+                      </a>
+                    ),
+                  )}
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <FileIcon size={30} />
+                  <p>{fileQuery ? 'No matching files' : 'No files here'}</p>
+                </div>
+              )}
+            </section>
+          ) : (
           <section className="library-panel" aria-labelledby="library-heading">
             <div className="panel-heading">
               <div>
@@ -1017,6 +1284,7 @@ function App() {
               </div>
             ) : null}
           </section>
+          )}
         </section>
       </section>
     </main>
@@ -1187,7 +1455,7 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
 
 function getTitlesForView(
   collections: LibraryCollections,
-  activeView: ViewMode,
+  activeView: MediaViewMode,
   query: string,
 ) {
   if (query.trim()) {
@@ -1235,6 +1503,18 @@ function filterTitles<T extends LibraryTitle>(titles: T[], query: string) {
         .includes(normalizedQuery),
     )
   })
+}
+
+function filterFileEntries(entries: FileShareEntry[], query: string) {
+  const normalizedQuery = query.trim().toLowerCase()
+
+  if (!normalizedQuery) {
+    return entries
+  }
+
+  return entries.filter((entry) =>
+    `${entry.name} ${entry.relativePath}`.toLowerCase().includes(normalizedQuery),
+  )
 }
 
 function sortByTitle(first: LibraryTitle, second: LibraryTitle) {
@@ -1318,6 +1598,18 @@ function resolveMediaUrl(streamUrl: string, apiBase: string) {
   return buildApiUrl(streamUrl, apiBase)
 }
 
+function resolveFileDownloadUrl(entry: FileShareEntry, apiBase: string) {
+  return entry.downloadUrl ? buildApiUrl(entry.downloadUrl, apiBase) : '#'
+}
+
+function getFileDirectoryLabel(fileShare: FileShareResponse | null) {
+  if (!fileShare) {
+    return 'Desktop'
+  }
+
+  return fileShare.summary.relativePath || fileShare.summary.root
+}
+
 function handleMediaKey(event: KeyboardEvent, player: HTMLVideoElement | null) {
   if (event.key !== 'MediaPlayPause' || !player) {
     return false
@@ -1387,7 +1679,7 @@ function handleDirectionalFocus(event: KeyboardEvent) {
 function getFocusableElements() {
   return Array.from(
     document.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), input:not(:disabled), video[controls]',
+      'a[href], button:not(:disabled), input:not(:disabled), video[controls]',
     ),
   ).filter((element) => element.getClientRects().length > 0)
 }
@@ -1464,6 +1756,15 @@ function formatScanTime(value: string) {
   return new Intl.DateTimeFormat(undefined, {
     hour: 'numeric',
     minute: '2-digit',
+  }).format(new Date(value))
+}
+
+function formatFileModifiedTime(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    month: 'short',
   }).format(new Date(value))
 }
 

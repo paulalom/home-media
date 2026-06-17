@@ -8,6 +8,7 @@ My Home Media Server is an opinionated, local-first media server focused on resp
 - Local Vite middleware API that scans `F:/media` for video files.
 - Byte-range media streaming endpoint for browser playback.
 - Movies and TV shows grouped as title-level library entries.
+- Out-of-the-way file browser for one-off LAN downloads.
 - Server-side JSON metadata store for watched/resume history, with browser-local fallback.
 
 ## Scripts
@@ -37,5 +38,7 @@ This repo includes a Tizen Web app prototype path for Samsung TVs. See [docs/sam
 ## Project Notes
 
 The project currently defaults to `F:/media`. Set `HOME_MEDIA_ROOT` before starting Vite to point the scanner at another folder.
+
+Generic file sharing defaults to your Desktop. Set `HOME_MEDIA_FILES_ROOT` before starting Vite to point the Files view at another folder.
 
 Playback metadata is stored outside the repository by default at `%LOCALAPPDATA%/My Home Media Server/metadata.json` on Windows, or `~/.my-home-media-server/metadata.json` when no local app data directory is available. Set `HOME_MEDIA_METADATA_PATH` to choose a different JSON file. If you point it into this repo, use `.my-home-media-server/metadata.json` or `my-home-media-server-data/metadata.json`; both folders are ignored by git.

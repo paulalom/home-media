@@ -67,6 +67,35 @@ export type LibraryResponse = {
   items: MediaItem[]
 }
 
+export type FileShareEntryKind = 'directory' | 'file'
+
+export type FileShareEntry = {
+  id: string
+  name: string
+  kind: FileShareEntryKind
+  relativePath: string
+  sizeBytes: number
+  sizeLabel: string
+  modifiedAt: string
+  downloadUrl?: string
+}
+
+export type FileShareSummary = {
+  root: string
+  relativePath: string
+  parentPath: string | null
+  scannedAt: string
+  directories: number
+  files: number
+  totalBytes: number
+  sizeLabel: string
+}
+
+export type FileShareResponse = {
+  summary: FileShareSummary
+  entries: FileShareEntry[]
+}
+
 type RangeRequest = {
   start: number
   end: number
@@ -200,6 +229,7 @@ type TmdbSearchResponse = {
 }
 
 const DEFAULT_MEDIA_ROOT = 'F:/media'
+const DEFAULT_FILE_SHARE_DIRECTORY_NAME = 'Desktop'
 const ARTWORK_CACHE_DIRECTORY_NAME = 'My Home Media Server'
 const PREVIEW_FRAME_CACHE_DIRECTORY_NAME = 'preview-frames'
 const VIDEO_EXTENSIONS = new Set([
@@ -277,6 +307,37 @@ const IMAGE_MIME_BY_EXTENSION = new Map([
   ['.png', 'image/png'],
   ['.webp', 'image/webp'],
 ])
+const GENERIC_FILE_MIME_BY_EXTENSION = new Map([
+  ['.7z', 'application/x-7z-compressed'],
+  ['.aac', 'audio/aac'],
+  ['.csv', 'text/csv; charset=utf-8'],
+  ['.doc', 'application/msword'],
+  [
+    '.docx',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ],
+  ['.gif', 'image/gif'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.md', 'text/markdown; charset=utf-8'],
+  ['.mp3', 'audio/mpeg'],
+  ['.pdf', 'application/pdf'],
+  ['.ppt', 'application/vnd.ms-powerpoint'],
+  [
+    '.pptx',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  ],
+  ['.rar', 'application/vnd.rar'],
+  ['.rtf', 'application/rtf'],
+  ['.txt', 'text/plain; charset=utf-8'],
+  ['.wav', 'audio/wav'],
+  ['.xls', 'application/vnd.ms-excel'],
+  [
+    '.xlsx',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ],
+  ['.zip', 'application/zip'],
+])
 const IMAGE_EXTENSION_BY_MIME = new Map([
   ['image/jpeg', '.jpg'],
   ['image/png', '.png'],
@@ -288,7 +349,7 @@ const API_CORS_HEADERS = {
     'DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Expose-Headers':
-    'Accept-Ranges, Content-Length, Content-Range, Content-Type',
+    'Accept-Ranges, Content-Disposition, Content-Length, Content-Range, Content-Type',
 }
 const MAX_JSON_BODY_BYTES = 64 * 1024
 let libraryCache: LibraryCache | null = null
@@ -303,6 +364,14 @@ const previewFrameFetches = new Map<string, Promise<string>>()
 
 export function getMediaRoot() {
   return process.env.HOME_MEDIA_ROOT ?? DEFAULT_MEDIA_ROOT
+}
+
+export function getFileShareRoot() {
+  const configuredRoot = process.env.HOME_MEDIA_FILES_ROOT?.trim()
+
+  return configuredRoot
+    ? resolve(configuredRoot)
+    : resolve(homedir(), DEFAULT_FILE_SHARE_DIRECTORY_NAME)
 }
 
 export function getArtworkCacheRoot() {
@@ -385,15 +454,129 @@ export async function scanMediaLibrary(
   }
 }
 
+export async function readFileShareDirectory(
+  requestedPath = '',
+): Promise<FileShareResponse> {
+  const root = resolve(getFileShareRoot())
+  const directory = getFileShareDirectoryPath(root, requestedPath)
+
+  if (!directory) {
+    throw createHttpError(400, 'Invalid file path')
+  }
+
+  let directoryStats: Stats
+
+  try {
+    directoryStats = await fs.stat(directory)
+  } catch {
+    throw createHttpError(404, 'File share folder not found')
+  }
+
+  if (!directoryStats.isDirectory()) {
+    throw createHttpError(404, 'File share folder not found')
+  }
+
+  if (!(await isPathInsideRealRoot(root, directory))) {
+    throw createHttpError(400, 'Invalid file path')
+  }
+
+  let entries
+
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true })
+  } catch {
+    throw createHttpError(403, 'File share folder cannot be opened')
+  }
+
+  const fileEntries: FileShareEntry[] = []
+  let directories = 0
+  let files = 0
+  let totalBytes = 0
+
+  for (const entry of entries) {
+    const isDirectory = entry.isDirectory()
+    const isRegularFile = entry.isFile()
+
+    if (entry.isSymbolicLink() || (!isDirectory && !isRegularFile)) {
+      continue
+    }
+
+    const entryPath = resolve(directory, entry.name)
+
+    if (!isPathInside(root, entryPath)) {
+      continue
+    }
+
+    let stats: Stats
+
+    try {
+      stats = await fs.lstat(entryPath)
+    } catch {
+      continue
+    }
+
+    const relativePath = relative(root, entryPath)
+    const fileId = encodeFileId(relativePath)
+    const sizeBytes = isRegularFile ? stats.size : 0
+
+    if (isDirectory) {
+      directories += 1
+    } else {
+      files += 1
+      totalBytes += stats.size
+    }
+
+    fileEntries.push({
+      id: fileId,
+      name: entry.name,
+      kind: isDirectory ? 'directory' : 'file',
+      relativePath,
+      sizeBytes,
+      sizeLabel: isRegularFile ? formatBytes(sizeBytes) : '',
+      modifiedAt: stats.mtime.toISOString(),
+      downloadUrl: isRegularFile
+        ? `/api/files/${encodeURIComponent(fileId)}/download`
+        : undefined,
+    })
+  }
+
+  fileEntries.sort(sortFileShareEntries)
+
+  const relativePath = relative(root, directory)
+  const normalizedRelativePath = relativePath === '.' ? '' : relativePath
+  const parentRelativePath = normalizedRelativePath
+    ? relative(root, dirname(directory))
+    : null
+
+  return {
+    summary: {
+      root,
+      relativePath: normalizedRelativePath,
+      parentPath:
+        parentRelativePath === null || parentRelativePath === '.'
+          ? null
+          : parentRelativePath,
+      scannedAt: new Date().toISOString(),
+      directories,
+      files,
+      totalBytes,
+      sizeLabel: formatBytes(totalBytes),
+    },
+    entries: fileEntries,
+  }
+}
+
 export async function handleMediaApi(
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'http://my-home-media-server.local')
   const isApiPath =
+    url.pathname === '/api/files' ||
     url.pathname === '/api/library' ||
     url.pathname === '/api/playback' ||
     url.pathname === '/api/preview-cache' ||
+    /^\/api\/files\/[^/]+\/download$/.test(url.pathname) ||
     /^\/api\/playback\/[^/]+$/.test(url.pathname) ||
     /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|preview-sheet|preview-sprite|stream)$/.test(
       url.pathname,
@@ -402,6 +585,24 @@ export async function handleMediaApi(
   if (isApiPath && req.method === 'OPTIONS') {
     res.writeHead(204, API_CORS_HEADERS)
     res.end()
+
+    return true
+  }
+
+  if (url.pathname === '/api/files') {
+    if (req.method !== 'GET') {
+      sendMethodNotAllowed(res, ['GET'])
+      return true
+    }
+
+    try {
+      sendJson(
+        res,
+        await readFileShareDirectory(url.searchParams.get('path') ?? ''),
+      )
+    } catch (error) {
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+    }
 
     return true
   }
@@ -509,6 +710,32 @@ export async function handleMediaApi(
       }
 
       sendJson(res, await upsertPlaybackRecord(mediaId, playbackRecord))
+    } catch (error) {
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+    }
+
+    return true
+  }
+
+  const fileDownloadMatch = /^\/api\/files\/([^/]+)\/download$/.exec(
+    url.pathname,
+  )
+
+  if (fileDownloadMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      sendMethodNotAllowed(res, ['GET', 'HEAD'])
+      return true
+    }
+
+    const fileId = decodeUrlSegment(fileDownloadMatch[1])
+
+    if (!fileId) {
+      sendError(res, 400, 'Invalid file id')
+      return true
+    }
+
+    try {
+      await streamSharedFile(fileId, req, res)
     } catch (error) {
       sendError(res, getErrorStatusCode(error), getErrorMessage(error))
     }
@@ -2635,6 +2862,62 @@ async function streamMedia(
   }
 
   const mimeType = MIME_BY_EXTENSION.get(extension) ?? 'application/octet-stream'
+
+  streamFileContent(filePath, stats, req, res, {
+    cacheControl: 'no-store',
+    contentType: mimeType,
+  })
+}
+
+async function streamSharedFile(
+  fileId: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+) {
+  const filePath = getFileSharePath(fileId)
+
+  if (!filePath) {
+    sendError(res, 404, 'File not found')
+    return
+  }
+
+  let stats: Stats
+
+  try {
+    stats = await fs.lstat(filePath)
+  } catch {
+    sendError(res, 404, 'File not found')
+    return
+  }
+
+  if (!stats.isFile()) {
+    sendError(res, 404, 'File not found')
+    return
+  }
+
+  if (!(await isPathInsideRealRoot(getFileShareRoot(), filePath))) {
+    sendError(res, 404, 'File not found')
+    return
+  }
+
+  streamFileContent(filePath, stats, req, res, {
+    cacheControl: 'no-store',
+    contentDisposition: getAttachmentContentDisposition(basename(filePath)),
+    contentType: getGenericFileMimeType(filePath),
+  })
+}
+
+function streamFileContent(
+  filePath: string,
+  stats: Stats,
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: {
+    cacheControl: string
+    contentDisposition?: string
+    contentType: string
+  },
+) {
   const range = parseRangeHeader(req.headers.range, stats.size)
 
   if (req.headers.range && !range) {
@@ -2647,13 +2930,22 @@ async function streamMedia(
     return
   }
 
+  const baseHeaders: Record<string, number | string> = {
+    ...API_CORS_HEADERS,
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': options.cacheControl,
+    'Content-Type': options.contentType,
+    'Last-Modified': stats.mtime.toUTCString(),
+  }
+
+  if (options.contentDisposition) {
+    baseHeaders['Content-Disposition'] = options.contentDisposition
+  }
+
   if (!range) {
     res.writeHead(200, {
-      ...API_CORS_HEADERS,
-      'Accept-Ranges': 'bytes',
-      'Cache-Control': 'no-store',
+      ...baseHeaders,
       'Content-Length': stats.size,
-      'Content-Type': mimeType,
     })
 
     if (req.method === 'HEAD') {
@@ -2668,12 +2960,9 @@ async function streamMedia(
   const contentLength = range.end - range.start + 1
 
   res.writeHead(206, {
-    ...API_CORS_HEADERS,
-    'Accept-Ranges': 'bytes',
-    'Cache-Control': 'no-store',
+    ...baseHeaders,
     'Content-Length': contentLength,
     'Content-Range': `bytes ${range.start}-${range.end}/${stats.size}`,
-    'Content-Type': mimeType,
   })
 
   if (req.method === 'HEAD') {
@@ -2782,6 +3071,39 @@ function getMediaPath(mediaId: string) {
   return filePath
 }
 
+function getFileShareDirectoryPath(root: string, requestedPath: string) {
+  const relativePath = normalizeFileSharePath(requestedPath)
+
+  if (relativePath === null) {
+    return null
+  }
+
+  const directory = resolve(root, relativePath)
+
+  if (!isPathInside(root, directory)) {
+    return null
+  }
+
+  return directory
+}
+
+function getFileSharePath(fileId: string) {
+  const root = resolve(getFileShareRoot())
+  const relativePath = decodeFileId(fileId)
+
+  if (!relativePath) {
+    return null
+  }
+
+  const filePath = resolve(root, relativePath)
+
+  if (!isPathInside(root, filePath)) {
+    return null
+  }
+
+  return filePath
+}
+
 async function findArtworkPath(mediaPath: string) {
   const root = resolve(getMediaRoot())
   const mediaDirectory = dirname(mediaPath)
@@ -2815,21 +3137,102 @@ async function isFile(path: string) {
 }
 
 function encodeMediaId(relativePath: string) {
-  return Buffer.from(relativePath, 'utf8').toString('base64url')
+  return encodeRelativePathId(relativePath)
 }
 
 function decodeMediaId(mediaId: string) {
+  return decodeRelativePathId(mediaId)
+}
+
+function encodeFileId(relativePath: string) {
+  return encodeRelativePathId(relativePath)
+}
+
+function decodeFileId(fileId: string) {
+  return decodeRelativePathId(fileId)
+}
+
+function encodeRelativePathId(relativePath: string) {
+  return Buffer.from(relativePath, 'utf8').toString('base64url')
+}
+
+function decodeRelativePathId(pathId: string) {
   try {
-    return Buffer.from(mediaId, 'base64url').toString('utf8')
+    return Buffer.from(pathId, 'base64url').toString('utf8')
   } catch {
     return null
   }
+}
+
+function normalizeFileSharePath(requestedPath: string) {
+  const normalizedPath = requestedPath.trim().replace(/[\\/]+$/g, '')
+
+  if (!normalizedPath || normalizedPath === '.') {
+    return ''
+  }
+
+  if (normalizedPath.split(/[\\/]/).some((part) => !part || part === '..')) {
+    return null
+  }
+
+  return normalizedPath
 }
 
 function isPathInside(root: string, candidate: string) {
   const relativePath = relative(root, candidate)
 
   return relativePath === '' || (!relativePath.startsWith('..') && !isAbsolute(relativePath))
+}
+
+async function isPathInsideRealRoot(root: string, candidate: string) {
+  try {
+    const realRoot = await fs.realpath(root)
+    const realCandidate = await fs.realpath(candidate)
+
+    return isPathInside(realRoot, realCandidate)
+  } catch {
+    return false
+  }
+}
+
+function sortFileShareEntries(first: FileShareEntry, second: FileShareEntry) {
+  if (first.kind !== second.kind) {
+    return first.kind === 'directory' ? -1 : 1
+  }
+
+  return first.name.localeCompare(second.name, undefined, {
+    numeric: true,
+    sensitivity: 'base',
+  })
+}
+
+function getGenericFileMimeType(filePath: string) {
+  const extension = extname(filePath).toLowerCase()
+
+  return (
+    GENERIC_FILE_MIME_BY_EXTENSION.get(extension) ??
+    IMAGE_MIME_BY_EXTENSION.get(extension) ??
+    MIME_BY_EXTENSION.get(extension) ??
+    'application/octet-stream'
+  )
+}
+
+function getAttachmentContentDisposition(filename: string) {
+  const fallbackFilename =
+    filename.replace(/["\\\r\n]/g, '_').replace(/[^\x20-\x7e]/g, '_') ||
+    'download'
+
+  return `attachment; filename="${fallbackFilename}"; filename*=UTF-8''${encodeHeaderValue(
+    filename,
+  )}`
+}
+
+function encodeHeaderValue(value: string) {
+  return encodeURIComponent(value).replace(
+    /['()*]/g,
+    (character) =>
+      `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  )
 }
 
 function getSourceName(relativePath: string) {
