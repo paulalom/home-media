@@ -29,14 +29,22 @@ This repo includes Windows helpers for running the LAN dev server:
 
 ```powershell
 .\scripts\start-server.ps1
-.\scripts\install-windows-service.ps1
-.\scripts\uninstall-windows-service.ps1
+.\scripts\install-windows-startup-task.ps1
+.\scripts\uninstall-windows-startup-task.ps1
 ```
 
-The service installer uses WinSW to create an automatic Windows service named
-`HomeMediaServer`. The service runs `npm run dev:lan` on the port configured in
-`package.json`, falling back to port `23232` if no port is specified, and writes
-its service wrapper files under `.home-media/service`, which is ignored by git.
+The startup task installer creates a per-user Scheduled Task named
+`HomeMediaServer` that runs when the current Windows user logs in. The task runs
+`npm run dev:lan` on the port configured in `package.json`, falling back to port
+`23232` if no port is specified. Because it runs as the signed-in user, Desktop
+sharing, metadata, artwork, and preview-cache folders resolve under that user's
+profile.
+
+If you previously installed the old machine-level WinSW service, remove it with:
+
+```powershell
+.\scripts\uninstall-windows-service.ps1
+```
 
 Library scans do not warm preview thumbnails automatically. Use the Preview cache
 Warm button to generate missing thumbnails, or set

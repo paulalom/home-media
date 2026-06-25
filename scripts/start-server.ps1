@@ -10,8 +10,13 @@ $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $ServiceId = 'HomeMediaServer'
+$AppDataRoot = if ($env:LOCALAPPDATA) {
+  Join-Path $env:LOCALAPPDATA 'My Home Media Server'
+} else {
+  Join-Path $ProjectRoot '.home-media'
+}
 $LogRoot = if ($env:LOCALAPPDATA) {
-  Join-Path $env:LOCALAPPDATA 'My Home Media Server\logs'
+  Join-Path $AppDataRoot 'logs'
 } else {
   Join-Path $ProjectRoot '.home-media\logs'
 }
@@ -101,6 +106,28 @@ function Test-HomeMediaServerProcessTree {
   return $false
 }
 
+function Set-UserRuntimeEnvironmentDefaults {
+  if (-not $env:HOME_MEDIA_FILES_ROOT) {
+    $env:HOME_MEDIA_FILES_ROOT = [Environment]::GetFolderPath('Desktop')
+  }
+
+  if (-not $env:HOME_MEDIA_METADATA_PATH) {
+    $env:HOME_MEDIA_METADATA_PATH = Join-Path $AppDataRoot 'metadata.json'
+  }
+
+  if (-not $env:HOME_MEDIA_ARTWORK_CACHE_ROOT) {
+    $env:HOME_MEDIA_ARTWORK_CACHE_ROOT = Join-Path $AppDataRoot 'artwork'
+  }
+
+  if (-not $env:HOME_MEDIA_PREVIEW_CACHE_ROOT) {
+    $env:HOME_MEDIA_PREVIEW_CACHE_ROOT = Join-Path $AppDataRoot 'preview-frames'
+  }
+
+  New-Item -ItemType Directory -Path $AppDataRoot -Force | Out-Null
+  New-Item -ItemType Directory -Path $env:HOME_MEDIA_ARTWORK_CACHE_ROOT -Force | Out-Null
+  New-Item -ItemType Directory -Path $env:HOME_MEDIA_PREVIEW_CACHE_ROOT -Force | Out-Null
+}
+
 if ($Restart -or $Stop) {
   Stop-HomeMediaServerProcess
 }
@@ -140,6 +167,7 @@ foreach ($owner in $portOwners) {
 }
 
 New-Item -ItemType Directory -Path $LogRoot -Force | Out-Null
+Set-UserRuntimeEnvironmentDefaults
 
 if ($Background) {
   $stdoutLog = Join-Path $LogRoot 'vite.out.log'
