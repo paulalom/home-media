@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -2462,69 +2463,81 @@ function TvApp() {
           </div>
           <div className="tv-detail-list" ref={detailListRef}>
             {detailTitle.items.map((item, itemIndex) => {
+              const previousItem = detailTitle.items[itemIndex - 1]
+              const seasonHeading = getDetailSeasonHeading(
+                detailTitle,
+                item,
+                previousItem,
+              )
               const isSelected = detailItemIndex === itemIndex
               const isEpisodeMenuSelected =
                 isSelected && detailFocusArea === 'episodeMenu'
               const playback = playbackHistory[item.id] ?? null
 
               return (
-                <div
-                  className={getDetailItemClassName(
-                    isSelected,
-                    isEpisodeMenuSelected,
-                  )}
-                  key={item.id}
-                  ref={isSelected ? detailSelectedItemRef : null}
-                >
-                  <button
-                    aria-label={`${getDetailItemTitle(item)} actions`}
-                    className={
-                      isEpisodeMenuSelected
-                        ? 'tv-icon-button selected'
-                        : 'tv-icon-button'
-                    }
-                    onClick={() => {
-                      setDetailState({
-                        focusArea: 'episodeMenu',
-                        itemIndex,
-                        title: detailTitle,
-                      })
-                      openEpisodeActionMenu(detailTitle, itemIndex)
-                    }}
-                    title={`${getDetailItemTitle(item)} actions`}
-                    type="button"
+                <Fragment key={item.id}>
+                  {seasonHeading ? (
+                    <div className="tv-detail-season-heading">
+                      <h3>{seasonHeading}</h3>
+                    </div>
+                  ) : null}
+                  <div
+                    className={getDetailItemClassName(
+                      isSelected,
+                      isEpisodeMenuSelected,
+                    )}
+                    ref={isSelected ? detailSelectedItemRef : null}
                   >
-                    <Settings size={20} />
-                  </button>
-                  <button
-                    className="tv-detail-play"
-                    onClick={() => {
-                      setDetailState({
-                        focusArea: 'episode',
-                        itemIndex,
-                        title: detailTitle,
-                      })
-                      startPlayback(item)
-                    }}
-                    type="button"
-                  >
-                    <span>{getDetailItemLabel(item)}</span>
-                    <strong>{getDetailItemTitle(item)}</strong>
-                    <p>{getDetailPlaybackLabel(item, playback)}</p>
-                    {playback && playback.duration > 0 ? (
-                      <div className="tv-progress" aria-hidden="true">
-                        <i
-                          style={{
-                            width: `${Math.min(
-                              (playback.position / playback.duration) * 100,
-                              100,
-                            )}%`,
-                          }}
-                        />
-                      </div>
-                    ) : null}
-                  </button>
-                </div>
+                    <button
+                      aria-label={`${getDetailItemTitle(item)} actions`}
+                      className={
+                        isEpisodeMenuSelected
+                          ? 'tv-icon-button selected'
+                          : 'tv-icon-button'
+                      }
+                      onClick={() => {
+                        setDetailState({
+                          focusArea: 'episodeMenu',
+                          itemIndex,
+                          title: detailTitle,
+                        })
+                        openEpisodeActionMenu(detailTitle, itemIndex)
+                      }}
+                      title={`${getDetailItemTitle(item)} actions`}
+                      type="button"
+                    >
+                      <Settings size={20} />
+                    </button>
+                    <button
+                      className="tv-detail-play"
+                      onClick={() => {
+                        setDetailState({
+                          focusArea: 'episode',
+                          itemIndex,
+                          title: detailTitle,
+                        })
+                        startPlayback(item)
+                      }}
+                      type="button"
+                    >
+                      <span>{getDetailItemLabel(item)}</span>
+                      <strong>{getDetailItemTitle(item)}</strong>
+                      <p>{getDetailPlaybackLabel(item, playback)}</p>
+                      {playback && playback.duration > 0 ? (
+                        <div className="tv-progress" aria-hidden="true">
+                          <i
+                            style={{
+                              width: `${Math.min(
+                                (playback.position / playback.duration) * 100,
+                                100,
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                    </button>
+                  </div>
+                </Fragment>
               )
             })}
           </div>
@@ -2793,7 +2806,7 @@ function buildTvTitles(items: MediaItem[], history: PlaybackHistory) {
       lastWatchedAt: latestWatchedAt,
       resumeItem,
       source: sortedEpisodes[0]?.source ?? 'TV Shows',
-      subtitle: `${sortedEpisodes.length} episodes`,
+      subtitle: formatShowSubtitle(sortedEpisodes),
       title: sortedEpisodes[0]?.showTitle ?? key.split(':').slice(1).join(':'),
     }
   })
@@ -2881,6 +2894,46 @@ function createEmptyPlayerEpisodeSwitchOptions(): PlayerEpisodeSwitchOptions {
 
 function getShowGroupKey(item: MediaItem) {
   return `${item.source}:${(item.showTitle ?? item.title).toLowerCase()}`
+}
+
+function formatShowSubtitle(episodes: MediaItem[]) {
+  const episodeCount = episodes.length
+  const seasonCount = getShowSeasonCount(episodes)
+  const episodeLabel = formatCountLabel(episodeCount, 'episode')
+
+  return seasonCount > 0
+    ? `${episodeLabel}, ${formatCountLabel(seasonCount, 'season')}`
+    : episodeLabel
+}
+
+function getShowSeasonCount(episodes: MediaItem[]) {
+  return new Set(
+    episodes
+      .map((episode) => episode.seasonNumber)
+      .filter((seasonNumber): seasonNumber is number =>
+        Number.isInteger(seasonNumber),
+      ),
+  ).size
+}
+
+function formatCountLabel(count: number, label: string) {
+  return `${count} ${label}${count === 1 ? '' : 's'}`
+}
+
+function getDetailSeasonHeading(
+  title: TvTitle,
+  item: MediaItem,
+  previousItem: MediaItem | undefined,
+) {
+  if (title.kind !== 'show' || !Number.isInteger(item.seasonNumber)) {
+    return null
+  }
+
+  if (previousItem?.seasonNumber === item.seasonNumber) {
+    return null
+  }
+
+  return `Season ${item.seasonNumber}`
 }
 
 function clampFocus(focus: FocusPosition, sections: TvSection[]) {

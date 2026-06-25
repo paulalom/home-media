@@ -501,6 +501,23 @@ button {
   display: none;
 }
 
+.tv-detail-season-heading {
+  align-items: flex-end;
+  border-top: 1px solid rgb(174 181 176 / 28%);
+  display: flex;
+  min-height: 42px;
+  padding: 12px 2px 0 68px;
+}
+
+.tv-detail-season-heading h3 {
+  color: var(--tv-text-soft);
+  font-size: 0.9rem;
+  font-weight: 900;
+  line-height: 1.1;
+  margin: 0;
+  text-transform: uppercase;
+}
+
 .tv-detail-item {
   color: inherit;
   display: grid;

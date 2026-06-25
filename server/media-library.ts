@@ -3659,10 +3659,10 @@ function getMovieTitle(
 
 function parseEpisodeNumbers(filename: string) {
   const match =
-    /\b(?<marker>S(?<season>\d{1,2})E(?<episode>\d{1,3}))\b/i.exec(
+    /(?:^|[.\s_-])(?<marker>S(?<season>\d{1,2})E(?<episode>\d{1,3}))(?=$|[.\s_-])/i.exec(
       filename,
     ) ??
-    /\b(?<marker>(?<season>\d{1,2})x(?<episode>\d{1,3}))\b/i.exec(
+    /(?:^|[.\s_-])(?<marker>(?<season>\d{1,2})x(?<episode>\d{1,3}))(?=$|[.\s_-])/i.exec(
       filename,
     ) ??
     /(?:^|[.\s_-])(?<marker>(?<season>\d)(?<episode>\d{2}))(?:[.\s_-]|$)/i.exec(
