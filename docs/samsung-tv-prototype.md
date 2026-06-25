@@ -39,7 +39,7 @@ Make sure `public/home-media-config.js` points at the desktop server:
 
 ```js
 window.HOME_MEDIA_CONFIG = {
-  apiBase: 'http://192.168.88.210:4173',
+  apiBase: 'http://192.168.88.210:23232',
 }
 ```
 
@@ -60,7 +60,7 @@ npm run preview:lan
 From a phone or another computer on the same network, verify:
 
 ```text
-http://192.168.1.25:4173/api/library
+http://192.168.1.25:23232/api/library
 ```
 
 If that URL does not load, the TV will not load the library either. Check Windows Firewall, the selected adapter IP, and whether the Vite preview server is still running.
@@ -134,14 +134,14 @@ The preferred path is to set the URL in `public/home-media-config.js` before `np
 
 ```js
 window.HOME_MEDIA_CONFIG = {
-  apiBase: 'http://192.168.88.210:4173',
+  apiBase: 'http://192.168.88.210:23232',
 }
 ```
 
 If the TV app opens but points at the wrong server, select the settings icon in the app, enter the server URL, and save:
 
 ```text
-http://192.168.1.25:4173
+http://192.168.1.25:23232
 ```
 
 The app stores that value in TV local storage.

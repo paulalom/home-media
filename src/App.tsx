@@ -896,7 +896,7 @@ function App() {
                 <input
                   id="server-url"
                   onChange={(event) => setApiBaseDraft(event.target.value)}
-                  placeholder="http://192.168.1.25:4173"
+                  placeholder="http://192.168.1.25:23232"
                   value={apiBaseDraft}
                 />
                 <div className="settings-actions">

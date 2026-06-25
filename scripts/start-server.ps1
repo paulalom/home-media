@@ -3,7 +3,7 @@ param(
   [switch]$Background,
   [switch]$Restart,
   [switch]$Stop,
-  [int]$Port = 5173
+  [int]$Port = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +26,24 @@ function Get-HomeMediaServerProcess {
       $_.CommandLine -match $projectPattern -and
       ($_.CommandLine -match 'vite' -or $_.CommandLine -match 'dev:lan' -or $_.CommandLine -match 'npm')
     }
+}
+
+function Get-ConfiguredPort {
+  $defaultPort = 23232
+
+  try {
+    $packagePath = Join-Path $ProjectRoot 'package.json'
+    $package = Get-Content -Path $packagePath -Raw | ConvertFrom-Json
+    $devLanScript = [string]$package.scripts.'dev:lan'
+
+    if ($devLanScript -match '(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)') {
+      return [int]$matches[1]
+    }
+  } catch {
+    Write-Warning "Could not read the configured Vite port from package.json: $($_.Exception.Message)"
+  }
+
+  $defaultPort
 }
 
 function Stop-HomeMediaServerProcess {
@@ -56,8 +74,39 @@ function Test-HomeMediaServiceRunning {
   $service -and $service.Status -eq 'Running'
 }
 
+function Test-HomeMediaServerProcessTree {
+  param($Process)
+
+  $currentProcess = $Process
+
+  while ($currentProcess) {
+    if ($currentProcess.Name -eq 'HomeMediaServer.exe') {
+      return $true
+    }
+
+    if (
+      $currentProcess.CommandLine -and
+      $currentProcess.CommandLine -match [regex]::Escape($ProjectRoot)
+    ) {
+      return $true
+    }
+
+    if (-not $currentProcess.ParentProcessId -or $currentProcess.ParentProcessId -eq 0) {
+      return $false
+    }
+
+    $currentProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($currentProcess.ParentProcessId)" -ErrorAction SilentlyContinue
+  }
+
+  return $false
+}
+
 if ($Restart -or $Stop) {
   Stop-HomeMediaServerProcess
+}
+
+if ($Port -le 0) {
+  $Port = Get-ConfiguredPort
 }
 
 if ($Stop) {
@@ -67,12 +116,20 @@ if ($Stop) {
 
 $portOwners = @(Get-PortOwner)
 foreach ($owner in $portOwners) {
-  if ($owner.CommandLine -and $owner.CommandLine -match [regex]::Escape($ProjectRoot)) {
+  if (Test-HomeMediaServerProcessTree $owner) {
+    if ($Restart) {
+      throw "Home Media server is still running on port $Port (PID $($owner.ProcessId)). If it is the Windows service, restart it from an elevated PowerShell session or Services."
+    }
+
     Write-Host "Home Media server is already running on port $Port (PID $($owner.ProcessId))."
     exit 0
   }
 
   if (Test-HomeMediaServiceRunning) {
+    if ($Restart) {
+      throw "Home Media server service is still running on port $Port. Restart it from an elevated PowerShell session or Services."
+    }
+
     Write-Host "Home Media server service is already running on port $Port."
     exit 0
   }

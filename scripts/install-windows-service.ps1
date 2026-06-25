@@ -34,6 +34,24 @@ function ConvertTo-XmlValue {
   [Security.SecurityElement]::Escape($Value)
 }
 
+function Get-ConfiguredPort {
+  $defaultPort = 23232
+
+  try {
+    $packagePath = Join-Path $ProjectRoot 'package.json'
+    $package = Get-Content -Path $packagePath -Raw | ConvertFrom-Json
+    $devLanScript = [string]$package.scripts.'dev:lan'
+
+    if ($devLanScript -match '(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)') {
+      return [int]$matches[1]
+    }
+  } catch {
+    Write-Warning "Could not read the configured Vite port from package.json: $($_.Exception.Message)"
+  }
+
+  $defaultPort
+}
+
 New-Item -ItemType Directory -Path $ServiceRoot -Force | Out-Null
 
 if (-not (Test-Administrator)) {
@@ -75,6 +93,7 @@ $metadataPath = if ($env:LOCALAPPDATA) {
 } else {
   Join-Path $ProjectRoot '.home-media\metadata.json'
 }
+$serverPort = Get-ConfiguredPort
 $serviceLogPath = Join-Path $ServiceRoot 'logs'
 
 New-Item -ItemType Directory -Path $serviceLogPath -Force | Out-Null
@@ -99,15 +118,16 @@ $escapedStartScript = ConvertTo-XmlValue $StartScript
 $escapedPowerShellExe = ConvertTo-XmlValue $powerShellExe
 $escapedDesktop = ConvertTo-XmlValue $desktop
 $escapedMetadataPath = ConvertTo-XmlValue $metadataPath
+$escapedServerPort = ConvertTo-XmlValue ([string]$serverPort)
 $escapedServiceLogPath = ConvertTo-XmlValue $serviceLogPath
 
 $serviceXmlContent = @"
 <service>
   <id>$escapedServiceId</id>
   <name>$escapedServiceName</name>
-  <description>Runs npm run dev:lan for My Home Media Server.</description>
+  <description>Runs npm run dev:lan for My Home Media Server on port $escapedServerPort.</description>
   <executable>$escapedPowerShellExe</executable>
-  <arguments>-NoProfile -ExecutionPolicy Bypass -File "$escapedStartScript"</arguments>
+  <arguments>-NoProfile -ExecutionPolicy Bypass -File "$escapedStartScript" -Port $escapedServerPort</arguments>
   <workingdirectory>$escapedProjectRoot</workingdirectory>
   <startmode>Automatic</startmode>
   <stoptimeout>15 sec</stoptimeout>
@@ -148,5 +168,5 @@ Start-Sleep -Seconds 5
 $service = Get-Service -Name $ServiceId -ErrorAction Stop
 Write-InstallLog "Service status: $($service.Status)"
 Write-Host "$ServiceName service is $($service.Status)."
-Write-Host "Local URL: http://localhost:5173/"
+Write-Host "Local URL: http://localhost:$serverPort/"
 Write-Host "Install log: $InstallLog"

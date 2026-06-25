@@ -1,3 +1,3 @@
 window.HOME_MEDIA_CONFIG = {
-  apiBase: 'http://192.168.88.210:4173',
+  apiBase: 'http://192.168.88.210:23232',
 }

@@ -34,7 +34,8 @@ This repo includes Windows helpers for running the LAN dev server:
 ```
 
 The service installer uses WinSW to create an automatic Windows service named
-`HomeMediaServer`. The service runs `npm run dev:lan` on system start and writes
+`HomeMediaServer`. The service runs `npm run dev:lan` on the port configured in
+`package.json`, falling back to port `23232` if no port is specified, and writes
 its service wrapper files under `.home-media/service`, which is ignored by git.
 
 ## Samsung TV Prototype

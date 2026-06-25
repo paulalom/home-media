@@ -4,13 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "dev:lan": "vite --host 0.0.0.0",
+    "dev": "vite --port 23232 --strictPort",
+    "dev:lan": "vite --host 0.0.0.0 --port 23232 --strictPort",
     "build": "tsc -b && vite build",
     "build:tv": "tsc -b && vite build --base=./",
     "lint": "eslint .",
-    "preview": "vite preview",
-    "preview:lan": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --port 23232 --strictPort",
+    "preview:lan": "vite preview --host 0.0.0.0 --port 23232 --strictPort"
   },
   "dependencies": {
     "lucide-react": "^1.18.0",

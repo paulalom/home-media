@@ -179,6 +179,7 @@ type MyHomeMediaServerWindow = Window & {
 
 const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
+const libraryRequestTimeoutMs = 15000
 const maxRowItems = 28
 const playerHudHideDelayMs = 1000
 const playerSeekStepSeconds = 5
@@ -485,6 +486,11 @@ function TvApp() {
 
   useEffect(() => {
     const controller = new AbortController()
+    let didTimeOut = false
+    const timeoutId = window.setTimeout(() => {
+      didTimeOut = true
+      controller.abort()
+    }, libraryRequestTimeoutMs)
 
     fetchLibrary(apiBase, controller.signal)
       .then((nextLibrary) => {
@@ -492,17 +498,26 @@ function TvApp() {
         setError(null)
       })
       .catch((requestError: unknown) => {
-        if (!controller.signal.aborted) {
-          setError(getErrorMessage(requestError))
+        if (!controller.signal.aborted || didTimeOut) {
+          setError(
+            didTimeOut
+              ? getLibraryRequestTimeoutMessage(apiBase)
+              : getLibraryRequestErrorMessage(requestError, apiBase),
+          )
         }
       })
       .finally(() => {
-        if (!controller.signal.aborted) {
+        window.clearTimeout(timeoutId)
+
+        if (!controller.signal.aborted || didTimeOut) {
           setIsLoading(false)
         }
       })
 
-    return () => controller.abort()
+    return () => {
+      window.clearTimeout(timeoutId)
+      controller.abort()
+    }
   }, [apiBase])
 
   const sections = useMemo(
@@ -2025,7 +2040,9 @@ function TvApp() {
       {error ? <section className="tv-error">{error}</section> : null}
 
       {isLoading ? (
-        <section className="tv-loading">Loading library</section>
+        <section className="tv-loading">
+          Loading library from {apiBase || 'this host'}
+        </section>
       ) : sections.length ? (
         <section className="tv-rows" aria-label="Media rows" ref={rowsRef}>
           {sections.map((section, sectionIndex) => {
@@ -2995,6 +3012,30 @@ function sortEpisodes(first: MediaItem, second: MediaItem) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
+}
+
+function getLibraryRequestTimeoutMessage(apiBase: string) {
+  return `Library request timed out after ${
+    libraryRequestTimeoutMs / 1000
+  } seconds. Check that My Home Media Server is running at ${getLibraryServerLabel(
+    apiBase,
+  )} and reachable from this TV.`
+}
+
+function getLibraryRequestErrorMessage(error: unknown, apiBase: string) {
+  const message = getErrorMessage(error)
+
+  if (/failed to fetch|load failed|network|connection|refused/i.test(message)) {
+    return `${message}. Check that My Home Media Server is running at ${getLibraryServerLabel(
+      apiBase,
+    )} and that this TV is on the same network.`
+  }
+
+  return message
+}
+
+function getLibraryServerLabel(apiBase: string) {
+  return apiBase || 'this host'
 }
 
 function getErrorMessage(error: unknown) {
