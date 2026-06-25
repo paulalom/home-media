@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -255,6 +256,10 @@ function TvApp() {
   const playerScanVisualCacheRef = useRef<Map<string, ScanPreviewVisual>>(
     new Map(),
   )
+  const playerScanVisualCacheGenerationRef = useRef(0)
+  const playerScanVisualPromisesRef = useRef<
+    Map<string, Promise<ScanPreviewVisual>>
+  >(new Map())
   const playerScanWasPlayingRef = useRef(false)
   const playerRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
@@ -267,6 +272,70 @@ function TvApp() {
   const scanPreviewVisualRequestKey = scanPreviewVisualRequest?.key ?? ''
   const scanPreviewVisualRequestKind = scanPreviewVisualRequest?.kind ?? null
   const scanPreviewVisualRequestUrl = scanPreviewVisualRequest?.url ?? ''
+
+  const markScanPreviewFrameReady = useCallback(
+    (
+      image: HTMLImageElement,
+      url: string,
+      onReady?: () => void,
+    ) => {
+      const markReady = () => {
+        playerScanLoadedFrameUrlsRef.current.add(url)
+        playerScanPreloadImagesRef.current.set(url, image)
+        onReady?.()
+      }
+
+      if (typeof image.decode !== 'function') {
+        markReady()
+        return
+      }
+
+      void image.decode().then(markReady, markReady)
+    },
+    [],
+  )
+
+  const loadCachedScanPreviewVisual = useCallback(
+    (request: ScanPreviewVisualRequest): Promise<ScanPreviewVisual> => {
+      const cachedVisual = playerScanVisualCacheRef.current.get(request.key)
+
+      if (cachedVisual) {
+        return Promise.resolve(cachedVisual)
+      }
+
+      const pendingVisual = playerScanVisualPromisesRef.current.get(request.key)
+
+      if (pendingVisual) {
+        return pendingVisual
+      }
+
+      const cacheGeneration = playerScanVisualCacheGenerationRef.current
+      const loadPromise = loadScanPreviewVisual(
+        request,
+        apiBase,
+        markScanPreviewFrameReady,
+      )
+        .then((visual) => {
+          if (playerScanVisualCacheGenerationRef.current === cacheGeneration) {
+            playerScanVisualCacheRef.current.set(visual.key, visual)
+          }
+
+          return visual
+        })
+        .finally(() => {
+          if (
+            playerScanVisualPromisesRef.current.get(request.key) === loadPromise
+          ) {
+            playerScanVisualPromisesRef.current.delete(request.key)
+          }
+        })
+
+      playerScanVisualPromisesRef.current.set(request.key, loadPromise)
+
+      return loadPromise
+    },
+    [apiBase, markScanPreviewFrameReady],
+  )
 
   useEffect(() => {
     playbackHistoryRef.current = playbackHistory
@@ -304,6 +373,7 @@ function TvApp() {
     const loadedFrameUrls = playerScanLoadedFrameUrlsRef.current
     const preloadImages = playerScanPreloadImagesRef.current
     const visualCache = playerScanVisualCacheRef.current
+    const visualPromises = playerScanVisualPromisesRef.current
 
     return () => {
       if (playerHudTimeoutRef.current !== null) {
@@ -328,10 +398,12 @@ function TvApp() {
       playerScanIntervalRef.current = null
       playerScanLastTickRef.current = null
       playerScanFrameLoadTokenRef.current += 1
+      playerScanVisualCacheGenerationRef.current += 1
       loadedFrameUrls.clear()
       preloadImages.clear()
       playerScanPreloadKeyRef.current = ''
       visualCache.clear()
+      visualPromises.clear()
       playerScanPreviewRef.current = null
       playerScanWasPlayingRef.current = false
     }
@@ -348,50 +420,29 @@ function TvApp() {
     }
 
     const loadToken = playerScanFrameLoadTokenRef.current + 1
-    const controller = new AbortController()
     const request: ScanPreviewVisualRequest = {
       key: scanPreviewVisualRequestKey,
       kind: scanPreviewVisualRequestKind,
       url: scanPreviewVisualRequestUrl,
     }
+    let isCurrent = true
 
     playerScanFrameLoadTokenRef.current = loadToken
 
-    const cachedVisual = playerScanVisualCacheRef.current.get(
-      request.key,
-    )
-
-    if (cachedVisual) {
-      const timeoutId = window.setTimeout(() => {
-        if (playerScanFrameLoadTokenRef.current === loadToken) {
-          setScanPreviewVisibleVisual(cachedVisual)
-        }
-      }, 0)
-
-      return () => {
-        controller.abort()
-        window.clearTimeout(timeoutId)
-      }
-    }
-
-    loadScanPreviewVisual(
-      request,
-      apiBase,
-      controller.signal,
-      markScanPreviewFrameReady,
-    )
+    loadCachedScanPreviewVisual(request)
       .then((visual) => {
-        playerScanVisualCacheRef.current.set(visual.key, visual)
-
-        if (playerScanFrameLoadTokenRef.current === loadToken) {
+        if (isCurrent && playerScanFrameLoadTokenRef.current === loadToken) {
           setScanPreviewVisibleVisual(visual)
         }
       })
       .catch(() => undefined)
 
-    return () => controller.abort()
+    return () => {
+      isCurrent = false
+    }
   }, [
     apiBase,
+    loadCachedScanPreviewVisual,
     scanPreviewVisualRequestKey,
     scanPreviewVisualRequestKind,
     scanPreviewVisualRequestUrl,
@@ -442,18 +493,17 @@ function TvApp() {
         continue
       }
 
-      void loadScanPreviewVisual(
-        request,
-        apiBase,
-        undefined,
-        markScanPreviewFrameReady,
-      ).then((visual) => {
-        playerScanVisualCacheRef.current.set(visual.key, visual)
-      }, undefined)
+      void loadCachedScanPreviewVisual(request).catch(() => undefined)
     }
 
     playerScanPreloadImagesRef.current = nextPreloadImages
-  }, [apiBase, playerClock.duration, playerItem, scanPreview])
+  }, [
+    apiBase,
+    loadCachedScanPreviewVisual,
+    playerClock.duration,
+    playerItem,
+    scanPreview,
+  ])
 
   useEffect(() => {
     registerSamsungRemoteKeys()
@@ -1148,6 +1198,7 @@ function TvApp() {
         playerScanHeldDirectionRef.current === direction &&
         !playerScanPreviewRef.current
       ) {
+        primePendingScanPreview(direction)
         beginScanPreview(direction, false)
       }
 
@@ -1155,6 +1206,7 @@ function TvApp() {
     }
 
     playerScanHeldDirectionRef.current = direction
+    primePendingScanPreview(direction)
 
     if (playerScanPreviewRef.current) {
       beginScanPreview(direction, true)
@@ -1229,6 +1281,7 @@ function TvApp() {
           }
 
     setScanPreviewState(nextPreview)
+    primeScanPreviewVisuals(nextPreview, duration)
 
     if (nextPreview.scanning) {
       playerScanLastTickRef.current = window.performance.now()
@@ -1339,29 +1392,75 @@ function TvApp() {
 
   function clearScanPreviewImages() {
     playerScanFrameLoadTokenRef.current += 1
+    playerScanVisualCacheGenerationRef.current += 1
     playerScanLoadedFrameUrlsRef.current.clear()
     playerScanPreloadImagesRef.current.clear()
     playerScanPreloadKeyRef.current = ''
     playerScanVisualCacheRef.current.clear()
+    playerScanVisualPromisesRef.current.clear()
     setScanPreviewVisibleVisual(null)
   }
 
-  function markScanPreviewFrameReady(
-    image: HTMLImageElement,
-    url: string,
-    onReady?: () => void,
-  ) {
-    const markReady = () => {
-      playerScanLoadedFrameUrlsRef.current.add(url)
-      onReady?.()
-    }
+  function primePendingScanPreview(direction: ScanDirection) {
+    const player = playerRef.current
 
-    if (typeof image.decode !== 'function') {
-      markReady()
+    if (!player || !playerItem) {
       return
     }
 
-    void image.decode().then(markReady, markReady)
+    const duration = getFiniteVideoDuration(player)
+
+    if (!duration) {
+      return
+    }
+
+    const currentPreview = playerScanPreviewRef.current
+    const preview: ScanPreview = {
+      direction,
+      position: currentPreview
+        ? clamp(currentPreview.position, 0, duration)
+        : player.currentTime,
+      scanning: true,
+      speedIndex: currentPreview?.speedIndex ?? 0,
+    }
+
+    primeScanPreviewVisuals(preview, duration, false)
+  }
+
+  function primeScanPreviewVisuals(
+    preview: ScanPreview,
+    duration: number,
+    includeLookahead = true,
+  ) {
+    if (!playerItem) {
+      return
+    }
+
+    const requests = [
+      getScanPreviewVisualRequest(playerItem, preview, apiBase),
+    ]
+
+    if (includeLookahead) {
+      requests.push(
+        ...getScanPreviewPreloadVisualRequests(
+          playerItem,
+          preview,
+          apiBase,
+          duration,
+        ),
+      )
+    }
+
+    const requestKeys = new Set<string>()
+
+    for (const request of requests) {
+      if (requestKeys.has(request.key)) {
+        continue
+      }
+
+      requestKeys.add(request.key)
+      void loadCachedScanPreviewVisual(request).catch(() => undefined)
+    }
   }
 
   function clearScanHoldTimeout() {
@@ -2459,11 +2558,20 @@ function resolveMediaUrl(streamUrl: string, apiBase: string) {
   return buildApiUrl(streamUrl, apiBase)
 }
 
+function getMediaPreviewVersion(item: MediaItem) {
+  const modifiedAtMs = Date.parse(item.modifiedAt)
+  const modifiedAtKey = Number.isFinite(modifiedAtMs)
+    ? String(Math.floor(modifiedAtMs))
+    : item.modifiedAt
+
+  return `${item.sizeBytes}-${modifiedAtKey}`
+}
+
 function getScanPreviewVisualRequest(
   item: MediaItem,
   preview: ScanPreview,
   apiBase: string,
-) : ScanPreviewVisualRequest {
+): ScanPreviewVisualRequest {
   const quality = preview.scanning ? 'low' : 'high'
   const bucketSeconds = getScanPreviewFrameBucketSeconds(preview)
   const framePosition = getScanPreviewFramePosition(
@@ -2499,6 +2607,7 @@ function getPreviewFrameUrl(
   const params = new URLSearchParams({
     quality,
     t: String(Math.max(framePosition, 0)),
+    v: getMediaPreviewVersion(item),
   })
 
   return resolveMediaUrl(
@@ -2515,6 +2624,7 @@ function getPreviewSpriteUrl(
   const params = new URLSearchParams({
     quality: 'low',
     t: String(Math.max(framePosition, 0)),
+    v: getMediaPreviewVersion(item),
   })
 
   return resolveMediaUrl(
@@ -2554,10 +2664,11 @@ function getScanPreviewPreloadVisualRequests(
       continue
     }
 
+    const url = getPreviewSpriteUrl(item, apiBase, preloadPosition)
     const request: ScanPreviewVisualRequest = {
-      key: `sprite:${getPreviewSpriteUrl(item, apiBase, preloadPosition)}`,
+      key: `sprite:${url}`,
       kind: 'sprite',
-      url: getPreviewSpriteUrl(item, apiBase, preloadPosition),
+      url,
     }
 
     if (!requestKeys.has(request.key)) {
@@ -2572,7 +2683,6 @@ function getScanPreviewPreloadVisualRequests(
 async function loadScanPreviewVisual(
   request: ScanPreviewVisualRequest,
   apiBase: string,
-  signal: AbortSignal | undefined,
   markReady: (
     image: HTMLImageElement,
     url: string,
@@ -2589,10 +2699,7 @@ async function loadScanPreviewVisual(
     }
   }
 
-  const response = await fetch(request.url, {
-    cache: 'no-store',
-    signal,
-  })
+  const response = await fetch(request.url)
 
   if (!response.ok) {
     throw new Error(`Preview sprite failed (${response.status})`)

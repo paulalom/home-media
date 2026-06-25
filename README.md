@@ -51,6 +51,12 @@ Warm button to generate missing thumbnails, or set
 `HOME_MEDIA_AUTO_WARM_PREVIEW_CACHE=1` before starting the server to opt into
 background warming.
 
+Artwork is served by the local server from nearby `poster`, `folder`, `cover`,
+or `artwork` image files first. If no local image exists, TV shows can fall back
+to TVmaze without an API key, and movies/TV shows can use TMDB when
+`HOME_MEDIA_TMDB_API_KEY` or `HOME_MEDIA_TMDB_BEARER_TOKEN` is set. Downloaded
+images are cached outside the repo under the same per-user app data location.
+
 ## Samsung TV Prototype
 
 This repo includes a Tizen Web app prototype path for Samsung TVs. See [docs/samsung-tv-prototype.md](docs/samsung-tv-prototype.md) for building a `.wgt`, running the media server on your LAN, and installing the app on a developer-mode TV.

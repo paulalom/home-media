@@ -119,16 +119,24 @@ type ArtworkTarget = {
   year?: number
 }
 
+type ArtworkProvider = 'tmdb' | 'tvmaze'
+
 type ArtworkCacheEntry = {
   cacheKey: string
   category: ArtworkCategory
   checkedAt: string
   contentType?: string
   fileName?: string
-  provider: 'tmdb'
+  provider: ArtworkProvider | 'remote'
   sourceUrl?: string
   status: 'missing' | 'ready'
   title: string
+}
+
+type RemoteArtwork = {
+  imageUrl: string
+  provider: ArtworkProvider
+  sourceUrl: string
 }
 
 type ResolvedArtwork = {
@@ -205,6 +213,10 @@ type PreviewSprite = {
   time: number
 }
 
+type JsonResponseOptions = {
+  cacheControl?: string
+}
+
 type TmdbCredentials =
   | {
       apiKey: string
@@ -226,6 +238,17 @@ type TmdbSearchResult = {
 
 type TmdbSearchResponse = {
   results?: TmdbSearchResult[]
+}
+
+type TvmazeShow = {
+  id?: number
+  image?: {
+    medium?: string
+    original?: string
+  } | null
+  name?: string
+  premiered?: string
+  url?: string
 }
 
 const DEFAULT_MEDIA_ROOT = 'F:/media'
@@ -255,6 +278,9 @@ const IGNORED_TOP_LEVEL_SOURCES = new Set(['mixes', 'music'])
 const ARTWORK_NAMES = ['poster', 'folder', 'cover', 'artwork']
 const TMDB_API_BASE_URL = 'https://api.themoviedb.org/3'
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500'
+const TVMAZE_API_BASE_URL = 'https://api.tvmaze.com'
+const REMOTE_METADATA_USER_AGENT =
+  'My Home Media Server/0.0.0 (local personal media server)'
 const ARTWORK_FETCH_TIMEOUT_MS = 10_000
 const ARTWORK_MISSING_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ARTWORK_BYTES = 8 * 1024 * 1024
@@ -820,7 +846,11 @@ export async function handleMediaApi(
       if (req.method === 'HEAD') {
         sendNoContent(res)
       } else {
-        sendJson(res, previewSprite)
+        sendJson(res, previewSprite, {
+          cacheControl: url.searchParams.has('v')
+            ? 'public, max-age=604800, immutable'
+            : 'public, max-age=60',
+        })
       }
     } catch (error) {
       sendError(res, getErrorStatusCode(error), getErrorMessage(error))
@@ -1684,8 +1714,6 @@ async function resolvePreviewSprite(
     quality,
   )
 
-  await resolvePreviewSpriteSheet(mediaPath, sheetInfo, quality)
-
   return {
     column: sheetInfo.column,
     columns: PREVIEW_SPRITE_COLUMNS,
@@ -1695,7 +1723,12 @@ async function resolvePreviewSprite(
     row: sheetInfo.row,
     rows: PREVIEW_SPRITE_ROWS,
     sheetIndex: sheetInfo.sheetIndex,
-    sheetUrl: getPreviewSpriteSheetUrl(mediaId, sheetInfo.sheetIndex, quality),
+    sheetUrl: getPreviewSpriteSheetUrl(
+      mediaId,
+      sheetInfo.sheetIndex,
+      quality,
+      sheetInfo.versionKey,
+    ),
     time: sheetInfo.frameTime,
   }
 }
@@ -2284,10 +2317,12 @@ function getPreviewSpriteSheetUrl(
   mediaId: string,
   sheetIndex: number,
   quality: PreviewFrameQuality,
+  versionKey: string,
 ) {
   const params = new URLSearchParams({
     quality,
     sheet: String(sheetIndex),
+    v: versionKey,
   })
 
   return `/api/media/${encodeURIComponent(mediaId)}/preview-sheet?${params}`
@@ -2541,7 +2576,7 @@ async function fetchAndCacheRemoteArtwork(
   const remoteArtwork = await findRemoteArtwork(target)
 
   if (!remoteArtwork) {
-    if (getTmdbCredentials()) {
+    if (canCheckRemoteArtwork(target)) {
       await writeMissingArtwork(target)
     }
 
@@ -2551,6 +2586,7 @@ async function fetchAndCacheRemoteArtwork(
   const response = await fetchWithTimeout(remoteArtwork.imageUrl, {
     headers: {
       Accept: 'image/webp,image/png,image/jpeg,*/*',
+      'User-Agent': REMOTE_METADATA_USER_AGENT,
     },
   })
 
@@ -2588,7 +2624,7 @@ async function fetchAndCacheRemoteArtwork(
     checkedAt: new Date().toISOString(),
     contentType,
     fileName,
-    provider: 'tmdb',
+    provider: remoteArtwork.provider,
     sourceUrl: remoteArtwork.sourceUrl,
     status: 'ready',
     title: target.title,
@@ -2602,6 +2638,31 @@ async function fetchAndCacheRemoteArtwork(
 }
 
 async function findRemoteArtwork(target: ArtworkTarget) {
+  const providers = [findTmdbArtwork, findTvmazeArtwork]
+  let lastError: unknown = null
+
+  for (const provider of providers) {
+    try {
+      const artwork = await provider(target)
+
+      if (artwork) {
+        return artwork
+      }
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  if (lastError) {
+    throw lastError
+  }
+
+  return null
+}
+
+async function findTmdbArtwork(
+  target: ArtworkTarget,
+): Promise<RemoteArtwork | null> {
   const credentials = getTmdbCredentials()
 
   if (!credentials) {
@@ -2650,9 +2711,52 @@ async function findRemoteArtwork(target: ArtworkTarget) {
 
   return {
     imageUrl: `${TMDB_IMAGE_BASE_URL}${result.poster_path}`,
+    provider: 'tmdb',
     sourceUrl: result.id
       ? `https://www.themoviedb.org/${mediaType}/${result.id}`
       : 'https://www.themoviedb.org/',
+  }
+}
+
+async function findTvmazeArtwork(
+  target: ArtworkTarget,
+): Promise<RemoteArtwork | null> {
+  if (target.category !== 'show') {
+    return null
+  }
+
+  const searchUrl = new URL(`${TVMAZE_API_BASE_URL}/singlesearch/shows`)
+
+  searchUrl.searchParams.set('q', target.searchTitle)
+
+  const response = await fetchWithTimeout(searchUrl, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': REMOTE_METADATA_USER_AGENT,
+    },
+  })
+
+  if (response.status === 404) {
+    return null
+  }
+
+  if (!response.ok) {
+    throw new Error(`TVmaze artwork search failed (${response.status})`)
+  }
+
+  const show = (await response.json()) as TvmazeShow
+  const imageUrl = normalizeRemoteImageUrl(
+    show.image?.medium ?? show.image?.original,
+  )
+
+  if (!imageUrl || !isAcceptableArtworkMatch(show.name, show.premiered, target)) {
+    return null
+  }
+
+  return {
+    imageUrl,
+    provider: 'tvmaze',
+    sourceUrl: show.url ?? getTvmazeSourceUrl(show.id),
   }
 }
 
@@ -2698,7 +2802,7 @@ async function writeMissingArtwork(target: ArtworkTarget) {
     cacheKey: target.cacheKey,
     category: target.category,
     checkedAt: new Date().toISOString(),
-    provider: 'tmdb',
+    provider: 'remote',
     status: 'missing',
     title: target.title,
   })
@@ -2751,6 +2855,16 @@ function getTmdbCredentials(): TmdbCredentials | null {
   return apiKey ? { apiKey } : null
 }
 
+function canCheckRemoteArtwork(target: ArtworkTarget) {
+  return Boolean(getTmdbCredentials()) || target.category === 'show'
+}
+
+function getTvmazeSourceUrl(showId: number | undefined) {
+  return showId
+    ? `https://www.tvmaze.com/shows/${showId}`
+    : 'https://www.tvmaze.com/'
+}
+
 function getArtworkCacheEntryPath(cacheKey: string) {
   return join(getArtworkCacheRoot(), `${cacheKey}.json`)
 }
@@ -2771,7 +2885,9 @@ function isArtworkCacheEntry(value: unknown): value is ArtworkCacheEntry {
     typeof value.cacheKey === 'string' &&
     (value.category === 'movie' || value.category === 'show') &&
     typeof value.checkedAt === 'string' &&
-    value.provider === 'tmdb' &&
+    (value.provider === 'remote' ||
+      value.provider === 'tmdb' ||
+      value.provider === 'tvmaze') &&
     (value.status === 'missing' || value.status === 'ready') &&
     typeof value.title === 'string' &&
     (value.contentType === undefined || typeof value.contentType === 'string') &&
@@ -2820,6 +2936,47 @@ function normalizeImageContentType(value: string | null) {
   return contentType && IMAGE_EXTENSION_BY_MIME.has(contentType)
     ? contentType
     : null
+}
+
+function normalizeRemoteImageUrl(value: string | undefined) {
+  if (!value) {
+    return null
+  }
+
+  try {
+    const url = new URL(value)
+
+    if (url.protocol === 'http:') {
+      url.protocol = 'https:'
+    }
+
+    return url.protocol === 'https:' ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function isAcceptableArtworkMatch(
+  title: string | undefined,
+  premiered: string | undefined,
+  target: ArtworkTarget,
+) {
+  const normalizedResultTitle = normalizeArtworkMatchTitle(title ?? '')
+  const normalizedTargetTitle = normalizeArtworkMatchTitle(target.searchTitle)
+
+  if (!normalizedResultTitle || !normalizedTargetTitle) {
+    return false
+  }
+
+  if (
+    normalizedResultTitle === normalizedTargetTitle ||
+    normalizedResultTitle.includes(normalizedTargetTitle) ||
+    normalizedTargetTitle.includes(normalizedResultTitle)
+  ) {
+    return true
+  }
+
+  return Boolean(target.year && getYearFromDate(premiered) === target.year)
 }
 
 function normalizeArtworkMatchTitle(title: string) {
@@ -3416,10 +3573,14 @@ function formatBytes(bytes: number) {
   }`
 }
 
-function sendJson(res: ServerResponse, payload: unknown) {
+function sendJson(
+  res: ServerResponse,
+  payload: unknown,
+  options: JsonResponseOptions = {},
+) {
   res.writeHead(200, {
     ...API_CORS_HEADERS,
-    'Cache-Control': 'no-store',
+    'Cache-Control': options.cacheControl ?? 'no-store',
     'Content-Type': 'application/json; charset=utf-8',
   })
   res.end(JSON.stringify(payload))

@@ -50,6 +50,7 @@ type MediaItem = {
   id: string
   title: string
   category: MediaCategory
+  artworkUrl?: string
   container: string
   browserPlayable: boolean
   relativePath: string
@@ -141,6 +142,7 @@ type MovieTitle = {
   id: string
   kind: 'movie'
   title: string
+  artworkUrl?: string
   item: MediaItem
   lastWatchedAt: number | null
   resumeItem: MediaItem
@@ -155,6 +157,7 @@ type ShowTitle = {
   id: string
   kind: 'show'
   title: string
+  artworkUrl?: string
   source: string
   episodes: MediaItem[]
   seasons: SeasonGroup[]
@@ -1176,34 +1179,44 @@ function App() {
                   </div>
                 </div>
 
-                {selectedItem.browserPlayable ? (
-                  <video
-                    className="main-media-player"
-                    controls
-                    key={selectedItem.id}
-                    onEnded={(event) =>
-                      recordPlayback(selectedItem, event.currentTarget, true)
-                    }
-                    onLoadedMetadata={(event) =>
-                      handleLoadedMetadata(selectedItem, event)
-                    }
-                    onPause={(event) =>
-                      recordPlayback(selectedItem, event.currentTarget, true)
-                    }
-                    onTimeUpdate={(event) =>
-                      recordPlayback(selectedItem, event.currentTarget)
-                    }
-                    preload="metadata"
-                    ref={playerRef}
-                    src={resolveMediaUrl(selectedItem.streamUrl, apiBase)}
+                <div className="main-player-body">
+                  <MediaArtwork
+                    apiBase={apiBase}
+                    artworkUrl={selectedTitle.artworkUrl ?? selectedItem.artworkUrl}
+                    className="main-title-artwork"
+                    title={selectedTitle.title}
                   />
-                ) : (
-                  <div className="player-frame unavailable wide">
-                    <Clapperboard size={42} />
-                    <p>{selectedItem.container} indexed</p>
-                    <span>Firefox needs a playable container</span>
+                  <div className="main-player-stage">
+                    {selectedItem.browserPlayable ? (
+                      <video
+                        className="main-media-player"
+                        controls
+                        key={selectedItem.id}
+                        onEnded={(event) =>
+                          recordPlayback(selectedItem, event.currentTarget, true)
+                        }
+                        onLoadedMetadata={(event) =>
+                          handleLoadedMetadata(selectedItem, event)
+                        }
+                        onPause={(event) =>
+                          recordPlayback(selectedItem, event.currentTarget, true)
+                        }
+                        onTimeUpdate={(event) =>
+                          recordPlayback(selectedItem, event.currentTarget)
+                        }
+                        preload="metadata"
+                        ref={playerRef}
+                        src={resolveMediaUrl(selectedItem.streamUrl, apiBase)}
+                      />
+                    ) : (
+                      <div className="player-frame unavailable wide">
+                        <Clapperboard size={42} />
+                        <p>{selectedItem.container} indexed</p>
+                        <span>Firefox needs a playable container</span>
+                      </div>
+                    )}
                   </div>
-                )}
+                </div>
 
                 <div className="main-player-meta">
                   <span>{selectedItem.relativePath}</span>
@@ -1291,6 +1304,51 @@ function App() {
   )
 }
 
+function MediaArtwork({
+  apiBase,
+  artworkUrl,
+  className = '',
+  title,
+}: {
+  apiBase: string
+  artworkUrl?: string
+  className?: string
+  title: string
+}) {
+  const classNames = ['media-artwork', className].filter(Boolean).join(' ')
+  const candidateArtworkUrl = artworkUrl
+    ? resolveMediaUrl(artworkUrl, apiBase)
+    : null
+  const [failedArtworkUrl, setFailedArtworkUrl] = useState<string | null>(null)
+  const resolvedArtworkUrl =
+    candidateArtworkUrl && failedArtworkUrl !== candidateArtworkUrl
+      ? candidateArtworkUrl
+      : null
+
+  return (
+    <div
+      aria-label={resolvedArtworkUrl ? `${title} poster` : 'No image found'}
+      className={classNames}
+      role="img"
+    >
+      {resolvedArtworkUrl ? (
+        <img
+          alt=""
+          decoding="async"
+          loading="lazy"
+          onError={() => setFailedArtworkUrl(candidateArtworkUrl)}
+          src={resolvedArtworkUrl}
+        />
+      ) : (
+        <div className="media-artwork-placeholder">
+          <Clapperboard size={30} />
+          <span>No image found</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function buildCollections(
   items: MediaItem[],
   history: PlaybackHistory,
@@ -1298,6 +1356,7 @@ function buildCollections(
   const movies = items
     .filter((item) => item.category === 'movie')
     .map<MovieTitle>((item) => ({
+      artworkUrl: item.artworkUrl,
       id: `movie:${item.id}`,
       item,
       kind: 'movie',
@@ -1343,6 +1402,8 @@ function buildCollections(
       )
 
       return {
+        artworkUrl: sortedEpisodes.find((episode) => episode.artworkUrl)
+          ?.artworkUrl,
         episodeCount: sortedEpisodes.length,
         episodes: sortedEpisodes,
         id: `show:${key}`,
