@@ -38,6 +38,11 @@ The service installer uses WinSW to create an automatic Windows service named
 `package.json`, falling back to port `23232` if no port is specified, and writes
 its service wrapper files under `.home-media/service`, which is ignored by git.
 
+Library scans do not warm preview thumbnails automatically. Use the Preview cache
+Warm button to generate missing thumbnails, or set
+`HOME_MEDIA_AUTO_WARM_PREVIEW_CACHE=1` before starting the server to opt into
+background warming.
+
 ## Samsung TV Prototype
 
 This repo includes a Tizen Web app prototype path for Samsung TVs. See [docs/samsung-tv-prototype.md](docs/samsung-tv-prototype.md) for building a `.wgt`, running the media server on your LAN, and installing the app on a developer-mode TV.

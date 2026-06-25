@@ -618,7 +618,7 @@ export async function handleMediaApi(
         res,
         await getCachedLibrary(
           url.searchParams.get('refresh') === '1',
-          'background',
+          getAutoPreviewCacheWarmMode(),
         ),
       )
     } catch (error) {
@@ -872,6 +872,15 @@ async function getCachedLibrary(
   }
 
   return data
+}
+
+function getAutoPreviewCacheWarmMode(): PreviewCacheWarmMode | null {
+  const value = process.env.HOME_MEDIA_AUTO_WARM_PREVIEW_CACHE?.trim()
+    .toLowerCase()
+
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on'
+    ? 'background'
+    : null
 }
 
 function ensurePreviewCacheWarm(

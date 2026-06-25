@@ -88,16 +88,26 @@ Write-InstallLog "Installing $ServiceName from $ProjectRoot..."
 $npmCommand = Get-Command npm.cmd -ErrorAction Stop
 $powerShellExe = "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe"
 $desktop = [Environment]::GetFolderPath('Desktop')
+$localAppData = $env:LOCALAPPDATA
+$appDataRoot = if ($localAppData) {
+  Join-Path $localAppData 'My Home Media Server'
+} else {
+  Join-Path $ProjectRoot '.home-media'
+}
 $metadataPath = if ($env:LOCALAPPDATA) {
-  Join-Path $env:LOCALAPPDATA 'My Home Media Server\metadata.json'
+  Join-Path $appDataRoot 'metadata.json'
 } else {
   Join-Path $ProjectRoot '.home-media\metadata.json'
 }
+$artworkCachePath = Join-Path $appDataRoot 'artwork'
+$previewCachePath = Join-Path $appDataRoot 'preview-frames'
 $serverPort = Get-ConfiguredPort
 $serviceLogPath = Join-Path $ServiceRoot 'logs'
 
 New-Item -ItemType Directory -Path $serviceLogPath -Force | Out-Null
 New-Item -ItemType Directory -Path (Split-Path $metadataPath -Parent) -Force | Out-Null
+New-Item -ItemType Directory -Path $artworkCachePath -Force | Out-Null
+New-Item -ItemType Directory -Path $previewCachePath -Force | Out-Null
 
 if (-not (Test-Path $ServiceExe)) {
   Write-InstallLog 'Downloading WinSW service wrapper...'
@@ -118,6 +128,8 @@ $escapedStartScript = ConvertTo-XmlValue $StartScript
 $escapedPowerShellExe = ConvertTo-XmlValue $powerShellExe
 $escapedDesktop = ConvertTo-XmlValue $desktop
 $escapedMetadataPath = ConvertTo-XmlValue $metadataPath
+$escapedArtworkCachePath = ConvertTo-XmlValue $artworkCachePath
+$escapedPreviewCachePath = ConvertTo-XmlValue $previewCachePath
 $escapedServerPort = ConvertTo-XmlValue ([string]$serverPort)
 $escapedServiceLogPath = ConvertTo-XmlValue $serviceLogPath
 
@@ -134,6 +146,8 @@ $serviceXmlContent = @"
   <stopparentprocessfirst>true</stopparentprocessfirst>
   <env name="HOME_MEDIA_FILES_ROOT" value="$escapedDesktop" />
   <env name="HOME_MEDIA_METADATA_PATH" value="$escapedMetadataPath" />
+  <env name="HOME_MEDIA_ARTWORK_CACHE_ROOT" value="$escapedArtworkCachePath" />
+  <env name="HOME_MEDIA_PREVIEW_CACHE_ROOT" value="$escapedPreviewCachePath" />
   <env name="PATH" value="$(ConvertTo-XmlValue "$($npmCommand.Source | Split-Path -Parent);$env:PATH")" />
   <logpath>$escapedServiceLogPath</logpath>
   <log mode="roll-by-size">
