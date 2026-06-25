@@ -1749,7 +1749,6 @@ function TvApp() {
         <video
           autoPlay
           className="tv-player"
-          controls
           key={playerItem.id}
           onEnded={(event) => {
             clearScanPreview()
@@ -1791,6 +1790,7 @@ function TvApp() {
             updatePlayerClock(event.currentTarget)
             showPlayerHud()
           }}
+          playsInline
           ref={playerRef}
           src={resolveMediaUrl(playerItem.streamUrl, apiBase)}
         />
@@ -1922,6 +1922,9 @@ function TvApp() {
                 <span>{formatEpisodeNumber(playerItem)}</span>
               </div>
               <span>{formatPlayerClock(playerClock)}</span>
+              <div className="tv-player-progress" aria-hidden="true">
+                <i style={{ width: `${playbackProgressPercent}%` }} />
+              </div>
             </>
           )}
         </div>

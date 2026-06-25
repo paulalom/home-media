@@ -639,6 +639,12 @@ button {
   width: 100vw;
 }
 
+.tv-player::-webkit-media-controls,
+.tv-player::-webkit-media-controls-enclosure,
+.tv-player::-webkit-media-controls-panel {
+  display: none !important;
+}
+
 .tv-player-blackout {
   background: rgb(0 0 0 / 90%);
   inset: 0;
@@ -734,6 +740,13 @@ button {
   z-index: 2;
 }
 
+.tv-player-info:not(.scanning) {
+  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  width: min(720px, calc(100vw - 64px));
+}
+
 .tv-player-info.scanning {
   background: rgb(5 6 7 / 86%);
   border-color: rgb(255 207 90 / 44%);
@@ -772,6 +785,21 @@ button {
   font-size: 0.98rem;
   min-width: 116px;
   text-align: right;
+}
+
+.tv-player-progress {
+  background: rgb(247 244 237 / 20%);
+  border-radius: 999px;
+  grid-column: 1 / -1;
+  height: 7px;
+  overflow: hidden;
+}
+
+.tv-player-progress i {
+  background: var(--tv-teal);
+  border-radius: inherit;
+  display: block;
+  height: 100%;
 }
 
 .tv-scan-thumbnail {
