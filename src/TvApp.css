@@ -653,6 +653,64 @@ button {
   z-index: 4;
 }
 
+.tv-player-debug {
+  background: rgb(5 6 7 / 88%);
+  border: 1px solid rgb(247 244 237 / 18%);
+  border-radius: 8px;
+  color: var(--tv-text-soft);
+  display: grid;
+  gap: 10px;
+  max-width: min(360px, calc(100vw - 48px));
+  padding: 14px 16px;
+  position: absolute;
+  right: 28px;
+  top: 26px;
+  width: 360px;
+  z-index: 6;
+}
+
+.tv-player-debug p {
+  color: var(--tv-gold);
+  font-size: 0.9rem;
+  font-weight: 900;
+  margin: 0;
+  text-transform: uppercase;
+}
+
+.tv-player-debug dl {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.tv-player-debug dl div {
+  align-items: baseline;
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.tv-player-debug dt,
+.tv-player-debug dd {
+  font-size: 0.82rem;
+  font-weight: 850;
+  margin: 0;
+}
+
+.tv-player-debug dt {
+  color: var(--tv-muted);
+  text-transform: uppercase;
+}
+
+.tv-player-debug dd {
+  color: var(--tv-text);
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tv-player-episode-switch {
   align-items: stretch;
   bottom: 42px;
@@ -765,6 +823,45 @@ button {
   opacity: 0;
   pointer-events: none;
   transform: translateY(8px);
+}
+
+.tv-short-seek-preview {
+  background: #000000;
+  border: 1px solid rgb(247 244 237 / 20%);
+  border-radius: 8px;
+  box-shadow: 0 12px 38px rgb(0 0 0 / 42%);
+  height: 144px;
+  overflow: hidden;
+  position: absolute;
+  right: 32px;
+  top: 32px;
+  width: 256px;
+  z-index: 3;
+}
+
+.tv-short-seek-preview img,
+.tv-short-seek-preview-sprite {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.tv-short-seek-preview-sprite {
+  background-repeat: no-repeat;
+  background-size: var(--scan-sprite-background-size);
+}
+
+.tv-short-seek-preview span {
+  background: rgb(5 6 7 / 82%);
+  border-radius: 6px;
+  bottom: 8px;
+  color: var(--tv-text);
+  font-size: 0.86rem;
+  font-weight: 900;
+  padding: 4px 7px;
+  position: absolute;
+  right: 8px;
 }
 
 .tv-player-title {

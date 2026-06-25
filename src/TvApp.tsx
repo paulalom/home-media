@@ -107,6 +107,10 @@ type ScanPreview = {
   speedIndex: number
 }
 
+type ShortSeekPreview = {
+  position: number
+}
+
 type ScanPreviewVisualRequest = {
   kind: 'image' | 'sprite'
   key: string
@@ -135,6 +139,27 @@ type PreviewSpriteResponse = {
   row: number
   rows: number
   sheetUrl: string
+}
+
+type ScanPreviewResourceMetrics = {
+  bodyBytes: number
+  durationMs: number
+  networkBytes: number
+}
+
+type ScanPreviewCacheStats = {
+  appHeapLimitMiB: number | null
+  appHeapMiB: number | null
+  bandwidthMiBps: number | null
+  budgetMiB: number
+  decodedCacheMiB: number
+  estimatedTotalMiB: number | null
+  estimatedSheetTransferKiB: number
+  loadMs: number
+  retainedSheetsPerDirection: number
+  sheetIndex: number
+  title: string
+  warmSheetsPerDirection: number
 }
 
 type PlayerEpisodeSwitchOptions = {
@@ -170,6 +195,7 @@ type MyHomeMediaServerWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
   }
+  HOME_MEDIA_SCAN_CACHE_STATS?: ScanPreviewCacheStats
   tizen?: {
     tvinputdevice?: {
       registerKey?: (key: string) => void
@@ -184,14 +210,26 @@ const libraryRequestTimeoutMs = 15000
 const maxRowItems = 28
 const playerHudHideDelayMs = 1000
 const playerSeekStepSeconds = 5
+const playerShortSeekPreviewHoldMs = 250
+const playerShortSeekPreviewBackgroundClicks = 5
+const playerShortSeekPreviewDirectionalClicks = 10
 const scanHoldDelayMs = 320
 const scanPreviewHighFrameBucketSeconds = 1
 const scanPreviewLowFrameBucketSeconds = 5
 const scanPreviewBaseSecondsPerSecond = 5
-const scanPreviewTickMs = 120
+const scanPreviewTickMs = 80
 const scanPreviewPreloadLookaheadSeconds = 3
 const scanPreviewPreloadMinimumFrames = 8
 const scanPreviewPreloadMaximumFrames = 40
+const scanPreviewClientCacheBudgetBytes = 30 * 1024 * 1024
+const scanPreviewFallbackSheetBytes = 8 * 1024 * 1024
+const scanPreviewFallbackSheetTransferBytes = 768 * 1024
+const scanPreviewLoadFallbackMs = 1000
+const scanPreviewLoadSafetyMultiplier = 2
+const scanPreviewMaximumBufferedSheetsPerDirection = 12
+const scanPreviewMinimumBufferedSheetsPerDirection = 1
+const scanPreviewMinimumRetainedSheetsPerDirection = 2
+const scanPreviewSpriteFramesPerSheet = 60
 const scanSpeedMultipliers = [2, 3, 4, 5, 6, 7, 8, 9, 10] as const
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
 
@@ -236,6 +274,12 @@ function TvApp() {
   const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null)
   const [scanPreviewVisibleVisual, setScanPreviewVisibleVisual] =
     useState<ScanPreviewVisual | null>(null)
+  const [scanCacheStats, setScanCacheStats] =
+    useState<ScanPreviewCacheStats | null>(null)
+  const [shortSeekPreview, setShortSeekPreview] =
+    useState<ShortSeekPreview | null>(null)
+  const [shortSeekPreviewVisibleVisual, setShortSeekPreviewVisibleVisual] =
+    useState<ScanPreviewVisual | null>(null)
   const playbackHistoryRef = useRef(playbackHistory)
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
@@ -244,10 +288,17 @@ function TvApp() {
   const playerScanCommitCleanupRef = useRef<(() => void) | null>(null)
   const playerScanHeldDirectionRef = useRef<ScanDirection | null>(null)
   const playerScanHoldTimeoutRef = useRef<number | null>(null)
+  const playerScanImageBytesRef = useRef<Map<string, number>>(new Map())
   const playerScanIntervalRef = useRef<number | null>(null)
   const playerScanLastTickRef = useRef<number | null>(null)
+  const playerScanAmbientWarmKeyRef = useRef('')
   const playerScanFrameLoadTokenRef = useRef(0)
   const playerScanLoadedFrameUrlsRef = useRef<Set<string>>(new Set())
+  const playerScanSheetBandwidthBytesPerSecondRef = useRef<number | null>(null)
+  const playerScanSheetTransferBytesRef = useRef(
+    scanPreviewFallbackSheetTransferBytes,
+  )
+  const playerScanVisualLoadMsRef = useRef(scanPreviewLoadFallbackMs)
   const playerScanPreloadImagesRef = useRef<Map<string, HTMLImageElement>>(
     new Map(),
   )
@@ -261,6 +312,10 @@ function TvApp() {
     Map<string, Promise<ScanPreviewVisual>>
   >(new Map())
   const playerScanWasPlayingRef = useRef(false)
+  const playerShortSeekPreviewLoadTokenRef = useRef(0)
+  const playerShortSeekPreviewTimeoutRef = useRef<number | null>(null)
+  const playerShortSeekWarmKeyRef = useRef('')
+  const playerShortSeekWarmRunIdRef = useRef(0)
   const playerRef = useRef<HTMLVideoElement | null>(null)
   const rowsRef = useRef<HTMLElement | null>(null)
   const selectedCardRef = useRef<HTMLButtonElement | null>(null)
@@ -282,6 +337,10 @@ function TvApp() {
       const markReady = () => {
         playerScanLoadedFrameUrlsRef.current.add(url)
         playerScanPreloadImagesRef.current.set(url, image)
+        playerScanImageBytesRef.current.set(
+          url,
+          estimateDecodedImageBytes(image),
+        )
         onReady?.()
       }
 
@@ -291,6 +350,24 @@ function TvApp() {
       }
 
       void image.decode().then(markReady, markReady)
+    },
+    [],
+  )
+
+  const cacheScanPreviewVisual = useCallback(
+    (request: ScanPreviewVisualRequest, visual: ScanPreviewVisual) => {
+      playerScanVisualCacheRef.current.set(visual.key, visual)
+
+      if (visual.kind !== 'sprite') {
+        return
+      }
+
+      for (const expandedVisual of getExpandedScanPreviewSpriteVisuals(
+        request,
+        visual,
+      )) {
+        playerScanVisualCacheRef.current.set(expandedVisual.key, expandedVisual)
+      }
     },
     [],
   )
@@ -310,14 +387,27 @@ function TvApp() {
       }
 
       const cacheGeneration = playerScanVisualCacheGenerationRef.current
+      const startedAt = window.performance.now()
       const loadPromise = loadScanPreviewVisual(
         request,
         apiBase,
         markScanPreviewFrameReady,
       )
         .then((visual) => {
+          if (request.kind === 'sprite') {
+            updateScanPreviewLoadMs(
+              playerScanVisualLoadMsRef,
+              window.performance.now() - startedAt,
+            )
+            updateScanPreviewBandwidthEstimate(
+              playerScanSheetTransferBytesRef,
+              playerScanSheetBandwidthBytesPerSecondRef,
+              getScanPreviewResourceMetrics(request, visual, startedAt),
+            )
+          }
+
           if (playerScanVisualCacheGenerationRef.current === cacheGeneration) {
-            playerScanVisualCacheRef.current.set(visual.key, visual)
+            cacheScanPreviewVisual(request, visual)
           }
 
           return visual
@@ -334,7 +424,149 @@ function TvApp() {
 
       return loadPromise
     },
-    [apiBase, markScanPreviewFrameReady],
+    [apiBase, cacheScanPreviewVisual, markScanPreviewFrameReady],
+  )
+
+  const prunePlaybackScanCache = useCallback(
+    (item: MediaItem, currentSheetIndex: number, duration: number) => {
+      const version = getMediaPreviewVersion(item)
+      const retainedRadius = getScanPreviewRetainedSheetRadius(
+        playerScanImageBytesRef.current,
+        playerScanVisualLoadMsRef.current,
+        playerScanSheetTransferBytesRef.current,
+        playerScanSheetBandwidthBytesPerSecondRef.current,
+      )
+      const firstRetainedSheet = Math.max(
+        currentSheetIndex - retainedRadius,
+        0,
+      )
+      const lastRetainedSheet = Math.min(
+        currentSheetIndex + retainedRadius,
+        getScanPreviewSheetIndex(duration),
+      )
+
+      for (const key of playerScanVisualCacheRef.current.keys()) {
+        if (
+          !isPreviewVisualInRetainedWindow(
+            key,
+            item,
+            version,
+            firstRetainedSheet,
+            lastRetainedSheet,
+          )
+        ) {
+          playerScanVisualCacheRef.current.delete(key)
+        }
+      }
+
+      const retainedImageUrls = new Set<string>()
+
+      for (const visual of playerScanVisualCacheRef.current.values()) {
+        retainedImageUrls.add(getScanPreviewVisualImageUrl(visual))
+      }
+
+      for (const imageUrl of playerScanPreloadImagesRef.current.keys()) {
+        if (!retainedImageUrls.has(imageUrl)) {
+          playerScanPreloadImagesRef.current.delete(imageUrl)
+          playerScanImageBytesRef.current.delete(imageUrl)
+        }
+      }
+    },
+    [],
+  )
+
+  const primePlaybackScanCache = useCallback(
+    (item: MediaItem, position: number, duration: number) => {
+      if (!duration) {
+        return
+      }
+
+      const currentSheetIndex = getScanPreviewSheetIndex(position)
+      const warmRadius = getScanPreviewWarmSheetRadius(
+        playerScanImageBytesRef.current,
+        playerScanVisualLoadMsRef.current,
+        playerScanSheetTransferBytesRef.current,
+        playerScanSheetBandwidthBytesPerSecondRef.current,
+      )
+      const retainedRadius = getScanPreviewRetainedSheetRadius(
+        playerScanImageBytesRef.current,
+        playerScanVisualLoadMsRef.current,
+        playerScanSheetTransferBytesRef.current,
+        playerScanSheetBandwidthBytesPerSecondRef.current,
+      )
+      const warmKey = [
+        item.id,
+        getMediaPreviewVersion(item),
+        currentSheetIndex,
+        warmRadius,
+      ].join(':')
+
+      prunePlaybackScanCache(item, currentSheetIndex, duration)
+      setScanCacheStats(
+        publishScanPreviewCacheStats(
+          item,
+          currentSheetIndex,
+          warmRadius,
+          retainedRadius,
+          playerScanImageBytesRef.current,
+          playerScanVisualLoadMsRef.current,
+          playerScanSheetTransferBytesRef.current,
+          playerScanSheetBandwidthBytesPerSecondRef.current,
+        ),
+      )
+
+      if (playerScanAmbientWarmKeyRef.current === warmKey) {
+        return
+      }
+
+      playerScanAmbientWarmKeyRef.current = warmKey
+
+      const cacheGeneration = playerScanVisualCacheGenerationRef.current
+      const currentPreview: ScanPreview = {
+        direction: 1,
+        position: clamp(position, 0, duration),
+        scanning: true,
+        speedIndex: 0,
+      }
+      const currentRequest = getScanPreviewVisualRequest(
+        item,
+        currentPreview,
+        apiBase,
+      )
+
+      void loadCachedScanPreviewVisual(currentRequest)
+        .catch(() => undefined)
+        .then(() => {
+          if (
+            playerScanVisualCacheGenerationRef.current !== cacheGeneration ||
+            playerScanAmbientWarmKeyRef.current !== warmKey
+          ) {
+            return
+          }
+
+          for (const sheetOffset of getScanPreviewWarmSheetOffsets(warmRadius)) {
+            const sheetPosition = getScanPreviewSheetStartPosition(
+              currentSheetIndex + sheetOffset,
+            )
+
+            if (sheetPosition < 0 || sheetPosition > duration) {
+              continue
+            }
+
+            const preview: ScanPreview = {
+              direction: sheetOffset > 0 ? 1 : -1,
+              position: sheetPosition,
+              scanning: true,
+              speedIndex: 0,
+            }
+
+            void loadCachedScanPreviewVisual(
+              getScanPreviewVisualRequest(item, preview, apiBase),
+            ).catch(() => undefined)
+          }
+        })
+    },
+    [apiBase, loadCachedScanPreviewVisual, prunePlaybackScanCache],
   )
 
   useEffect(() => {
@@ -371,6 +603,7 @@ function TvApp() {
 
   useEffect(() => {
     const loadedFrameUrls = playerScanLoadedFrameUrlsRef.current
+    const imageBytes = playerScanImageBytesRef.current
     const preloadImages = playerScanPreloadImagesRef.current
     const visualCache = playerScanVisualCacheRef.current
     const visualPromises = playerScanVisualPromisesRef.current
@@ -382,6 +615,10 @@ function TvApp() {
 
       if (playerScanHoldTimeoutRef.current !== null) {
         window.clearTimeout(playerScanHoldTimeoutRef.current)
+      }
+
+      if (playerShortSeekPreviewTimeoutRef.current !== null) {
+        window.clearTimeout(playerShortSeekPreviewTimeoutRef.current)
       }
 
       if (playerScanIntervalRef.current !== null) {
@@ -397,15 +634,22 @@ function TvApp() {
       playerScanHoldTimeoutRef.current = null
       playerScanIntervalRef.current = null
       playerScanLastTickRef.current = null
+      playerScanAmbientWarmKeyRef.current = ''
       playerScanFrameLoadTokenRef.current += 1
       playerScanVisualCacheGenerationRef.current += 1
+      imageBytes.clear()
       loadedFrameUrls.clear()
       preloadImages.clear()
       playerScanPreloadKeyRef.current = ''
+      playerScanSheetTransferBytesRef.current = scanPreviewFallbackSheetTransferBytes
       visualCache.clear()
       visualPromises.clear()
       playerScanPreviewRef.current = null
       playerScanWasPlayingRef.current = false
+      playerShortSeekPreviewLoadTokenRef.current += 1
+      playerShortSeekPreviewTimeoutRef.current = null
+      playerShortSeekWarmKeyRef.current = ''
+      playerShortSeekWarmRunIdRef.current += 1
     }
   }, [])
 
@@ -449,8 +693,13 @@ function TvApp() {
   ])
 
   useEffect(() => {
-    if (!playerItem || !scanPreview?.scanning) {
+    if (!playerItem) {
       playerScanPreloadImagesRef.current.clear()
+      playerScanPreloadKeyRef.current = ''
+      return
+    }
+
+    if (!scanPreview?.scanning) {
       playerScanPreloadKeyRef.current = ''
       return
     }
@@ -472,7 +721,7 @@ function TvApp() {
     }
 
     playerScanPreloadKeyRef.current = preloadKey
-    const nextPreloadImages = new Map<string, HTMLImageElement>()
+    const nextPreloadImages = new Map(playerScanPreloadImagesRef.current)
 
     for (const request of getScanPreviewPreloadVisualRequests(
       playerItem,
@@ -1256,6 +1505,7 @@ function TvApp() {
     }
 
     clearScanHoldTimeout()
+    clearShortSeekPreview()
 
     const currentPreview = playerScanPreviewRef.current
 
@@ -1281,6 +1531,7 @@ function TvApp() {
           }
 
     setScanPreviewState(nextPreview)
+    showCachedScanPreviewVisual(nextPreview)
     primeScanPreviewVisuals(nextPreview, duration)
 
     if (nextPreview.scanning) {
@@ -1393,12 +1644,144 @@ function TvApp() {
   function clearScanPreviewImages() {
     playerScanFrameLoadTokenRef.current += 1
     playerScanVisualCacheGenerationRef.current += 1
+    playerScanAmbientWarmKeyRef.current = ''
+    playerScanImageBytesRef.current.clear()
     playerScanLoadedFrameUrlsRef.current.clear()
     playerScanPreloadImagesRef.current.clear()
     playerScanPreloadKeyRef.current = ''
+    playerScanSheetTransferBytesRef.current = scanPreviewFallbackSheetTransferBytes
     playerScanVisualCacheRef.current.clear()
     playerScanVisualPromisesRef.current.clear()
+    clearShortSeekPreview()
+    playerShortSeekWarmKeyRef.current = ''
+    playerShortSeekWarmRunIdRef.current += 1
+    setScanCacheStats(null)
     setScanPreviewVisibleVisual(null)
+  }
+
+  function clearShortSeekPreview() {
+    if (playerShortSeekPreviewTimeoutRef.current !== null) {
+      window.clearTimeout(playerShortSeekPreviewTimeoutRef.current)
+      playerShortSeekPreviewTimeoutRef.current = null
+    }
+
+    playerShortSeekPreviewLoadTokenRef.current += 1
+    playerShortSeekWarmRunIdRef.current += 1
+    setShortSeekPreview(null)
+    setShortSeekPreviewVisibleVisual(null)
+  }
+
+  function showShortSeekPreview(position: number, duration: number) {
+    if (!playerItem || !duration || playerScanPreviewRef.current) {
+      return
+    }
+
+    if (playerShortSeekPreviewTimeoutRef.current !== null) {
+      window.clearTimeout(playerShortSeekPreviewTimeoutRef.current)
+    }
+
+    const preview = {
+      position: clamp(position, 0, duration),
+    }
+    const request = getShortSeekPreviewVisualRequest(
+      playerItem,
+      preview.position,
+      apiBase,
+    )
+    const cachedVisual = playerScanVisualCacheRef.current.get(request.key)
+    const loadToken = playerShortSeekPreviewLoadTokenRef.current + 1
+
+    playerShortSeekPreviewLoadTokenRef.current = loadToken
+    setShortSeekPreview(preview)
+
+    if (cachedVisual) {
+      setShortSeekPreviewVisibleVisual(cachedVisual)
+    } else {
+      void loadCachedScanPreviewVisual(request)
+        .then((visual) => {
+          if (playerShortSeekPreviewLoadTokenRef.current === loadToken) {
+            setShortSeekPreviewVisibleVisual(visual)
+          }
+        })
+        .catch(() => undefined)
+    }
+
+    playerShortSeekPreviewTimeoutRef.current = window.setTimeout(() => {
+      if (playerShortSeekPreviewLoadTokenRef.current === loadToken) {
+        setShortSeekPreview(null)
+        setShortSeekPreviewVisibleVisual(null)
+      }
+
+      playerShortSeekPreviewTimeoutRef.current = null
+    }, playerShortSeekPreviewHoldMs)
+  }
+
+  function primeShortSeekPreviewCache(
+    item: MediaItem,
+    position: number,
+    duration: number,
+    direction?: ScanDirection,
+  ) {
+    if (!duration) {
+      return
+    }
+
+    const version = getMediaPreviewVersion(item)
+    const stepIndex = Math.round(position / playerSeekStepSeconds)
+    const warmKey = [
+      item.id,
+      version,
+      stepIndex,
+      direction ?? 0,
+    ].join(':')
+
+    if (playerShortSeekWarmKeyRef.current === warmKey) {
+      return
+    }
+
+    playerShortSeekWarmKeyRef.current = warmKey
+    const warmRunId = playerShortSeekWarmRunIdRef.current + 1
+
+    playerShortSeekWarmRunIdRef.current = warmRunId
+    void warmShortSeekPreviewRequests(
+      getShortSeekPreviewVisualRequests(
+        item,
+        position,
+        duration,
+        apiBase,
+        direction,
+      ),
+      warmRunId,
+    )
+  }
+
+  async function warmShortSeekPreviewRequests(
+    requests: ScanPreviewVisualRequest[],
+    warmRunId: number,
+  ) {
+    for (const request of requests) {
+      if (playerShortSeekWarmRunIdRef.current !== warmRunId) {
+        return
+      }
+
+      try {
+        await loadCachedScanPreviewVisual(request)
+      } catch {
+        // Keep warming later targets even if one preview is unavailable.
+      }
+    }
+  }
+  function showCachedScanPreviewVisual(preview: ScanPreview) {
+    if (!playerItem) {
+      return
+    }
+
+    const request = getScanPreviewVisualRequest(playerItem, preview, apiBase)
+    const cachedVisual = playerScanVisualCacheRef.current.get(request.key)
+
+    if (cachedVisual) {
+      setScanPreviewVisibleVisual(cachedVisual)
+    }
   }
 
   function primePendingScanPreview(direction: ScanDirection) {
@@ -1554,11 +1937,14 @@ function TvApp() {
     const reachedBoundary = nextPosition === 0 || nextPosition === duration
 
     playerScanLastTickRef.current = now
-    setScanPreviewState({
+    const nextPreview = {
       ...preview,
       position: nextPosition,
       scanning: !reachedBoundary,
-    })
+    }
+
+    setScanPreviewState(nextPreview)
+    showCachedScanPreviewVisual(nextPreview)
 
     if (reachedBoundary) {
       stopScanPreviewTicker()
@@ -1578,13 +1964,22 @@ function TvApp() {
     }
 
     const duration = getFiniteVideoDuration(player)
-
-    player.currentTime = clamp(
-      player.currentTime + seconds,
+    const currentPosition = Number.isFinite(player.currentTime)
+      ? player.currentTime
+      : 0
+    const nextPosition = clamp(
+      currentPosition + seconds,
       0,
-      duration || player.currentTime,
+      duration || currentPosition,
     )
-    updatePlayerClock(player)
+
+    player.currentTime = nextPosition
+    updatePlayerClockFromValues(
+      duration,
+      nextPosition,
+      seconds >= 0 ? 1 : -1,
+    )
+    showShortSeekPreview(nextPosition, duration)
     showPlayerHud(!player.paused && !player.ended)
   }
 
@@ -1614,11 +2009,25 @@ function TvApp() {
     )
   }
 
-  function updatePlayerClockFromValues(duration: number, position: number) {
+  function updatePlayerClockFromValues(
+    duration: number,
+    position: number,
+    shortSeekDirection?: ScanDirection,
+  ) {
     setPlayerClock({
       duration,
       position,
     })
+
+    if (playerItem && !playerScanPreviewRef.current) {
+      primePlaybackScanCache(playerItem, position, duration)
+      primeShortSeekPreviewCache(
+        playerItem,
+        position,
+        duration,
+        shortSeekDirection,
+      )
+    }
   }
 
   function clearPlayerHudTimeout() {
@@ -1743,6 +2152,9 @@ function TvApp() {
       playerClock.position,
       playerClock.duration,
     )
+    const playerDebugStats = playerBlackoutVisible
+      ? scanCacheStats ?? getFallbackScanPreviewCacheStats(playerItem)
+      : null
 
     return (
       <main className="tv-player-shell">
@@ -1796,6 +2208,70 @@ function TvApp() {
         />
         {playerBlackoutVisible ? (
           <div className="tv-player-blackout" aria-hidden="true" />
+        ) : null}
+        {playerDebugStats ? (
+          <section className="tv-player-debug" aria-label="Player debug">
+            <p>Scan cache</p>
+            <dl>
+              <div>
+                <dt>Heap</dt>
+                <dd>{formatDebugMemory(playerDebugStats.appHeapMiB)}</dd>
+              </div>
+              <div>
+                <dt>Limit</dt>
+                <dd>{formatDebugMemory(playerDebugStats.appHeapLimitMiB)}</dd>
+              </div>
+              <div>
+                <dt>Preview RAM</dt>
+                <dd>
+                  {formatDebugMemory(playerDebugStats.decodedCacheMiB)} /{' '}
+                  {formatDebugMemory(playerDebugStats.budgetMiB)}
+                </dd>
+              </div>
+              <div>
+                <dt>Total est.</dt>
+                <dd>{formatDebugMemory(playerDebugStats.estimatedTotalMiB)}</dd>
+              </div>
+              <div>
+                <dt>Warm</dt>
+                <dd>+/-{playerDebugStats.warmSheetsPerDirection} sheets</dd>
+              </div>
+              <div>
+                <dt>Retain</dt>
+                <dd>+/-{playerDebugStats.retainedSheetsPerDirection} sheets</dd>
+              </div>
+              <div>
+                <dt>Load</dt>
+                <dd>{playerDebugStats.loadMs} ms</dd>
+              </div>
+              <div>
+                <dt>Transfer</dt>
+                <dd>{playerDebugStats.estimatedSheetTransferKiB} KiB</dd>
+              </div>
+              <div>
+                <dt>Bandwidth</dt>
+                <dd>{formatDebugBandwidth(playerDebugStats.bandwidthMiBps)}</dd>
+              </div>
+            </dl>
+          </section>
+        ) : null}
+        {shortSeekPreview ? (
+          <div className="tv-short-seek-preview" aria-hidden="true">
+            {shortSeekPreviewVisibleVisual?.kind === 'image' ? (
+              <img
+                alt=""
+                decoding="async"
+                draggable={false}
+                src={shortSeekPreviewVisibleVisual.url}
+              />
+            ) : shortSeekPreviewVisibleVisual?.kind === 'sprite' ? (
+              <div
+                className="tv-short-seek-preview-sprite"
+                style={getScanPreviewSpriteStyle(shortSeekPreviewVisibleVisual)}
+              />
+            ) : null}
+            <span>{formatDuration(shortSeekPreview.position)}</span>
+          </div>
         ) : null}
         {playerBlackoutVisible && hasPlayerEpisodeSwitchOptions ? (
           <div
@@ -2601,6 +3077,95 @@ function getScanPreviewVisualRequest(
   }
 }
 
+function getShortSeekPreviewVisualRequest(
+  item: MediaItem,
+  position: number,
+  apiBase: string,
+) {
+  return getScanPreviewVisualRequest(
+    item,
+    {
+      direction: 1,
+      position,
+      scanning: true,
+      speedIndex: 0,
+    },
+    apiBase,
+  )
+}
+
+function getShortSeekPreviewVisualRequests(
+  item: MediaItem,
+  position: number,
+  duration: number,
+  apiBase: string,
+  direction?: ScanDirection,
+) {
+  const requests: ScanPreviewVisualRequest[] = []
+  const requestKeys = new Set<string>()
+
+  const addRequest = (clickOffset: number) => {
+    const previewPosition = position + clickOffset * playerSeekStepSeconds
+
+    if (previewPosition < 0 || previewPosition > duration) {
+      return
+    }
+
+    const request = getShortSeekPreviewVisualRequest(
+      item,
+      previewPosition,
+      apiBase,
+    )
+
+    if (!requestKeys.has(request.key)) {
+      requests.push(request)
+      requestKeys.add(request.key)
+    }
+  }
+
+  addRequest(0)
+
+  for (const clickOffset of getShortSeekPreviewClickOffsets(direction)) {
+    addRequest(clickOffset)
+  }
+
+  return requests
+}
+
+function getShortSeekPreviewClickOffsets(direction?: ScanDirection) {
+  const clickOffsets: number[] = []
+
+  if (direction) {
+    for (
+      let clickOffset = 1;
+      clickOffset <= playerShortSeekPreviewDirectionalClicks;
+      clickOffset += 1
+    ) {
+      clickOffsets.push(direction * clickOffset)
+    }
+
+    for (
+      let clickOffset = 1;
+      clickOffset <= playerShortSeekPreviewBackgroundClicks;
+      clickOffset += 1
+    ) {
+      clickOffsets.push(-direction * clickOffset)
+    }
+
+    return clickOffsets
+  }
+
+  for (
+    let clickOffset = 1;
+    clickOffset <= playerShortSeekPreviewBackgroundClicks;
+    clickOffset += 1
+  ) {
+    clickOffsets.push(clickOffset, -clickOffset)
+  }
+
+  return clickOffsets
+}
+
 function getPreviewFrameUrl(
   item: MediaItem,
   apiBase: string,
@@ -2766,6 +3331,85 @@ function getScanPreviewVisualImageUrl(visual: ScanPreviewVisual) {
   return visual.kind === 'image' ? visual.url : visual.sheetUrl
 }
 
+function isPreviewVisualInRetainedWindow(
+  key: string,
+  item: MediaItem,
+  version: string,
+  firstRetainedSheet: number,
+  lastRetainedSheet: number,
+) {
+  const url = getScanPreviewVisualUrlFromKey(key)
+
+  if (!isPreviewUrlForMediaItem(url, item, version)) {
+    return false
+  }
+
+  const sheetIndex = getScanPreviewSheetIndex(getPreviewUrlFramePosition(url))
+
+  return sheetIndex >= firstRetainedSheet && sheetIndex <= lastRetainedSheet
+}
+
+function getScanPreviewVisualUrlFromKey(key: string) {
+  const separatorIndex = key.indexOf(':')
+
+  return separatorIndex >= 0 ? key.slice(separatorIndex + 1) : key
+}
+
+function isPreviewUrlForMediaItem(
+  url: string,
+  item: MediaItem,
+  version: string,
+) {
+  try {
+    const parsedUrl = new URL(url, window.location.origin)
+
+    return (
+      parsedUrl.pathname.includes(
+        `/api/media/${encodeURIComponent(item.id)}/`,
+      ) && parsedUrl.searchParams.get('v') === version
+    )
+  } catch {
+    return false
+  }
+}
+
+function getExpandedScanPreviewSpriteVisuals(
+  request: ScanPreviewVisualRequest,
+  visual: Extract<ScanPreviewVisual, { kind: 'sprite' }>,
+) {
+  const requestFramePosition = getPreviewUrlFramePosition(request.url)
+  const columns = Math.max(Math.floor(visual.columns), 1)
+  const rows = Math.max(Math.floor(visual.rows), 1)
+  const frameIndex = Math.max(
+    Math.round(requestFramePosition / scanPreviewLowFrameBucketSeconds),
+    0,
+  )
+  const frameCount = columns * rows
+  const sheetFrameCount =
+    frameCount > 0 ? frameCount : scanPreviewSpriteFramesPerSheet
+  const sheetStartFrameIndex =
+    Math.floor(frameIndex / sheetFrameCount) * sheetFrameCount
+  const expandedVisuals: Array<Extract<ScanPreviewVisual, { kind: 'sprite' }>> =
+    []
+
+  for (let index = 0; index < sheetFrameCount; index += 1) {
+    const framePosition =
+      (sheetStartFrameIndex + index) * scanPreviewLowFrameBucketSeconds
+
+    expandedVisuals.push({
+      column: index % columns,
+      columns,
+      key: `sprite:${setPreviewUrlFramePosition(request.url, framePosition)}`,
+      kind: 'sprite',
+      row: Math.floor(index / columns),
+      rows,
+      sheetUrl: visual.sheetUrl,
+    })
+  }
+
+  return expandedVisuals
+}
+
 function getScanPreviewSpriteStyle(
   visual: Extract<ScanPreviewVisual, { kind: 'sprite' }>,
 ) {
@@ -2795,6 +3439,374 @@ function getScanPreviewFrameBucketSeconds(preview: ScanPreview) {
   return scanPreviewLowFrameBucketSeconds
 }
 
+function getScanPreviewWarmSheetRadius(
+  imageBytes: Map<string, number>,
+  loadMs: number,
+  transferBytes: number,
+  bandwidthBytesPerSecond: number | null,
+) {
+  const sheetSeconds = getScanPreviewSheetSeconds()
+  const effectiveLoadMs = getScanPreviewEffectiveLoadMs(
+    loadMs,
+    transferBytes,
+    bandwidthBytesPerSecond,
+  )
+  const scanSecondsToCover =
+    (effectiveLoadMs / 1000) *
+    scanPreviewLoadSafetyMultiplier *
+    getMaximumScanPreviewSecondsPerSecond()
+  const latencyRadius = Math.ceil(scanSecondsToCover / sheetSeconds)
+
+  return Math.min(
+    clamp(
+      latencyRadius,
+      scanPreviewMinimumBufferedSheetsPerDirection,
+      scanPreviewMaximumBufferedSheetsPerDirection,
+    ),
+    getScanPreviewBudgetedSheetRadius(imageBytes),
+  )
+}
+
+function getScanPreviewRetainedSheetRadius(
+  imageBytes: Map<string, number>,
+  loadMs: number,
+  transferBytes: number,
+  bandwidthBytesPerSecond: number | null,
+) {
+  return Math.min(
+    Math.max(
+      getScanPreviewWarmSheetRadius(
+        imageBytes,
+        loadMs,
+        transferBytes,
+        bandwidthBytesPerSecond,
+      ) + 1,
+      scanPreviewMinimumRetainedSheetsPerDirection,
+    ),
+    getScanPreviewBudgetedSheetRadius(imageBytes),
+  )
+}
+
+function getScanPreviewEffectiveLoadMs(
+  loadMs: number,
+  transferBytes: number,
+  bandwidthBytesPerSecond: number | null,
+) {
+  if (!bandwidthBytesPerSecond || bandwidthBytesPerSecond <= 0) {
+    return loadMs
+  }
+
+  return Math.max(loadMs, (transferBytes / bandwidthBytesPerSecond) * 1000)
+}
+
+function getScanPreviewBudgetedSheetRadius(imageBytes: Map<string, number>) {
+  const estimatedSheetBytes = getAverageScanPreviewImageBytes(imageBytes)
+  const sheetBudget = Math.max(
+    Math.floor(scanPreviewClientCacheBudgetBytes / estimatedSheetBytes),
+    1,
+  )
+
+  return clamp(
+    Math.floor((sheetBudget - 1) / 2),
+    0,
+    scanPreviewMaximumBufferedSheetsPerDirection,
+  )
+}
+
+function getAverageScanPreviewImageBytes(imageBytes: Map<string, number>) {
+  const measuredBytes = Array.from(imageBytes.values()).filter(
+    (bytes) => bytes > 0,
+  )
+
+  if (!measuredBytes.length) {
+    return scanPreviewFallbackSheetBytes
+  }
+
+  return Math.max(
+    measuredBytes.reduce((sum, bytes) => sum + bytes, 0) /
+      measuredBytes.length,
+    1,
+  )
+}
+
+function getScanPreviewWarmSheetOffsets(radius: number) {
+  const offsets: number[] = []
+
+  for (let offset = 1; offset <= radius; offset += 1) {
+    offsets.push(-offset, offset)
+  }
+
+  return offsets
+}
+
+function getScanPreviewResourceMetrics(
+  request: ScanPreviewVisualRequest,
+  visual: ScanPreviewVisual,
+  startedAt: number,
+) {
+  const metrics = [
+    getPreviewResourceMetrics(request.url, startedAt),
+  ]
+
+  if (visual.kind === 'sprite') {
+    metrics.push(getPreviewResourceMetrics(visual.sheetUrl, startedAt))
+  }
+
+  return metrics.reduce<ScanPreviewResourceMetrics>(
+    (combinedMetrics, currentMetrics) => ({
+      bodyBytes: combinedMetrics.bodyBytes + currentMetrics.bodyBytes,
+      durationMs: combinedMetrics.durationMs + currentMetrics.durationMs,
+      networkBytes: combinedMetrics.networkBytes + currentMetrics.networkBytes,
+    }),
+    {
+      bodyBytes: 0,
+      durationMs: 0,
+      networkBytes: 0,
+    },
+  )
+}
+
+function getPreviewResourceMetrics(url: string, startedAt: number) {
+  const timing = getLatestPreviewResourceTiming(url, startedAt)
+
+  if (!timing) {
+    return {
+      bodyBytes: 0,
+      durationMs: 0,
+      networkBytes: 0,
+    }
+  }
+
+  const bodyBytes = Math.max(
+    timing.encodedBodySize || timing.decodedBodySize || timing.transferSize,
+    0,
+  )
+
+  return {
+    bodyBytes,
+    durationMs: Math.max(timing.duration, 0),
+    networkBytes: Math.max(timing.transferSize, 0),
+  }
+}
+
+function getLatestPreviewResourceTiming(url: string, startedAt: number) {
+  if (typeof performance.getEntriesByType !== 'function') {
+    return null
+  }
+
+  const candidateUrls = getPreviewTimingCandidateUrls(url)
+  const entries = performance
+    .getEntriesByType('resource')
+    .filter((entry): entry is PerformanceResourceTiming => {
+      return (
+        entry.entryType === 'resource' &&
+        candidateUrls.has(entry.name) &&
+        entry.startTime >= startedAt - 50
+      )
+    })
+
+  return entries.sort((first, second) => second.startTime - first.startTime)[0]
+    ?? null
+}
+
+function getPreviewTimingCandidateUrls(url: string) {
+  const urls = new Set([url])
+
+  try {
+    urls.add(new URL(url, window.location.origin).toString())
+  } catch {
+    return urls
+  }
+
+  return urls
+}
+
+function updateScanPreviewBandwidthEstimate(
+  transferBytesRef: { current: number },
+  bandwidthBytesPerSecondRef: { current: number | null },
+  metrics: ScanPreviewResourceMetrics,
+) {
+  if (metrics.bodyBytes > 0) {
+    transferBytesRef.current = updateWeightedScanPreviewAverage(
+      transferBytesRef.current,
+      metrics.bodyBytes,
+    )
+  }
+
+  if (metrics.networkBytes <= 0 || metrics.durationMs <= 0) {
+    return
+  }
+
+  const bytesPerSecond = metrics.networkBytes / (metrics.durationMs / 1000)
+
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
+    return
+  }
+
+  bandwidthBytesPerSecondRef.current =
+    bandwidthBytesPerSecondRef.current === null
+      ? bytesPerSecond
+      : updateWeightedScanPreviewAverage(
+          bandwidthBytesPerSecondRef.current,
+          bytesPerSecond,
+        )
+}
+
+function publishScanPreviewCacheStats(
+  item: MediaItem,
+  sheetIndex: number,
+  warmRadius: number,
+  retainedRadius: number,
+  imageBytes: Map<string, number>,
+  loadMs: number,
+  transferBytes: number,
+  bandwidthBytesPerSecond: number | null,
+) {
+  const memoryStats = getBrowserMemoryStats()
+  const decodedCacheMiB = roundMetric(
+    getTotalScanPreviewImageBytes(imageBytes) / (1024 * 1024),
+    1,
+  )
+  const estimatedTotalMiB =
+    memoryStats.usedMiB === null
+      ? null
+      : roundMetric(memoryStats.usedMiB + decodedCacheMiB, 1)
+  const stats: ScanPreviewCacheStats = {
+    appHeapLimitMiB: memoryStats.limitMiB,
+    appHeapMiB: memoryStats.usedMiB,
+    bandwidthMiBps: bandwidthBytesPerSecond
+      ? roundMetric(bandwidthBytesPerSecond / (1024 * 1024), 2)
+      : null,
+    budgetMiB: roundMetric(scanPreviewClientCacheBudgetBytes / (1024 * 1024), 1),
+    decodedCacheMiB,
+    estimatedTotalMiB,
+    estimatedSheetTransferKiB: Math.round(transferBytes / 1024),
+    loadMs: Math.round(loadMs),
+    retainedSheetsPerDirection: retainedRadius,
+    sheetIndex,
+    title: item.title,
+    warmSheetsPerDirection: warmRadius,
+  }
+  const statsWindow = window as MyHomeMediaServerWindow
+
+  statsWindow.HOME_MEDIA_SCAN_CACHE_STATS = stats
+
+  return stats
+}
+
+function getFallbackScanPreviewCacheStats(
+  item: MediaItem,
+): ScanPreviewCacheStats {
+  const memoryStats = getBrowserMemoryStats()
+
+  return {
+    appHeapLimitMiB: memoryStats.limitMiB,
+    appHeapMiB: memoryStats.usedMiB,
+    bandwidthMiBps: null,
+    budgetMiB: roundMetric(scanPreviewClientCacheBudgetBytes / (1024 * 1024), 1),
+    decodedCacheMiB: 0,
+    estimatedSheetTransferKiB: Math.round(
+      scanPreviewFallbackSheetTransferBytes / 1024,
+    ),
+    estimatedTotalMiB: memoryStats.usedMiB,
+    loadMs: scanPreviewLoadFallbackMs,
+    retainedSheetsPerDirection: scanPreviewMinimumRetainedSheetsPerDirection,
+    sheetIndex: 0,
+    title: item.title,
+    warmSheetsPerDirection: scanPreviewMinimumBufferedSheetsPerDirection,
+  }
+}
+
+function getTotalScanPreviewImageBytes(imageBytes: Map<string, number>) {
+  return Array.from(imageBytes.values()).reduce(
+    (totalBytes, imageByteCount) => totalBytes + imageByteCount,
+    0,
+  )
+}
+
+function roundMetric(value: number, digits: number) {
+  const factor = 10 ** digits
+
+  return Math.round(value * factor) / factor
+}
+
+function getBrowserMemoryStats() {
+  const memory = (
+    performance as Performance & {
+      memory?: {
+        jsHeapSizeLimit?: number
+        usedJSHeapSize?: number
+      }
+    }
+  ).memory
+
+  return {
+    limitMiB: memory?.jsHeapSizeLimit
+      ? roundMetric(memory.jsHeapSizeLimit / (1024 * 1024), 1)
+      : null,
+    usedMiB: memory?.usedJSHeapSize
+      ? roundMetric(memory.usedJSHeapSize / (1024 * 1024), 1)
+      : null,
+  }
+}
+
+function formatDebugMemory(value: number | null) {
+  return value === null ? 'n/a' : `${value} MB`
+}
+
+function formatDebugBandwidth(value: number | null) {
+  return value === null ? 'n/a' : `${value} MiB/s`
+}
+
+function updateScanPreviewLoadMs(
+  loadMsRef: { current: number },
+  loadMs: number,
+) {
+  if (!Number.isFinite(loadMs) || loadMs <= 0) {
+    return
+  }
+
+  loadMsRef.current = updateWeightedScanPreviewAverage(
+    loadMsRef.current,
+    loadMs,
+  )
+}
+
+function updateWeightedScanPreviewAverage(
+  currentValue: number,
+  nextValue: number,
+) {
+  return currentValue * 0.7 + nextValue * 0.3
+}
+
+function estimateDecodedImageBytes(image: HTMLImageElement) {
+  const width = Number.isFinite(image.naturalWidth) ? image.naturalWidth : 0
+  const height = Number.isFinite(image.naturalHeight) ? image.naturalHeight : 0
+
+  return width > 0 && height > 0 ? width * height * 4 : 0
+}
+
+function getMaximumScanPreviewSecondsPerSecond() {
+  return (
+    scanSpeedMultipliers[scanSpeedMultipliers.length - 1] *
+    scanPreviewBaseSecondsPerSecond
+  )
+}
+
+function getScanPreviewSheetSeconds() {
+  return scanPreviewLowFrameBucketSeconds * scanPreviewSpriteFramesPerSheet
+}
+
+function getScanPreviewSheetIndex(position: number) {
+  return Math.floor(
+    Math.max(position, 0) / getScanPreviewSheetSeconds(),
+  )
+}
+
+function getScanPreviewSheetStartPosition(sheetIndex: number) {
+  return sheetIndex * getScanPreviewSheetSeconds()
+}
+
 function getScanPreviewPreloadFrameCount(preview: ScanPreview) {
   const scanSecondsPerSecond =
     scanSpeedMultipliers[preview.speedIndex] * scanPreviewBaseSecondsPerSecond
@@ -2807,6 +3819,34 @@ function getScanPreviewPreloadFrameCount(preview: ScanPreview) {
     scanPreviewPreloadMinimumFrames,
     scanPreviewPreloadMaximumFrames,
   )
+}
+
+function getPreviewUrlFramePosition(url: string) {
+  try {
+    const parsedUrl = new URL(url, window.location.origin)
+    const framePosition = Number(parsedUrl.searchParams.get('t'))
+
+    return Number.isFinite(framePosition) ? framePosition : 0
+  } catch {
+    return 0
+  }
+}
+
+function setPreviewUrlFramePosition(url: string, framePosition: number) {
+  try {
+    const isAbsoluteUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(url)
+    const parsedUrl = new URL(url, window.location.origin)
+
+    parsedUrl.searchParams.set('t', String(Math.max(framePosition, 0)))
+
+    if (isAbsoluteUrl) {
+      return parsedUrl.toString()
+    }
+
+    return `${parsedUrl.pathname}${parsedUrl.search}${parsedUrl.hash}`
+  } catch {
+    return url
+  }
 }
 
 function getPrimaryActionLabel(

@@ -397,6 +397,7 @@ const API_CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Expose-Headers':
     'Accept-Ranges, Content-Disposition, Content-Length, Content-Range, Content-Type',
+  'Timing-Allow-Origin': '*',
 }
 const MAX_JSON_BODY_BYTES = 64 * 1024
 let libraryCache: LibraryCache | null = null
