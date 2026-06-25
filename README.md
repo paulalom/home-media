@@ -53,9 +53,10 @@ background warming.
 
 Artwork is served by the local server from nearby `poster`, `folder`, `cover`,
 or `artwork` image files first. If no local image exists, TV shows can fall back
-to TVmaze without an API key, and movies/TV shows can use TMDB when
-`HOME_MEDIA_TMDB_API_KEY` or `HOME_MEDIA_TMDB_BEARER_TOKEN` is set. Downloaded
-images are cached outside the repo under the same per-user app data location.
+to TVmaze without an API key, movies can fall back to IMDb suggestions without
+an API key, and movies/TV shows can use TMDB when `HOME_MEDIA_TMDB_API_KEY` or
+`HOME_MEDIA_TMDB_BEARER_TOKEN` is set. Downloaded images are cached outside the
+repo under the same per-user app data location.
 
 ## Samsung TV Prototype
 

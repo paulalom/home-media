@@ -119,7 +119,7 @@ type ArtworkTarget = {
   year?: number
 }
 
-type ArtworkProvider = 'tmdb' | 'tvmaze'
+type ArtworkProvider = 'imdb' | 'tmdb' | 'tvmaze'
 
 type ArtworkCacheEntry = {
   cacheKey: string
@@ -127,6 +127,7 @@ type ArtworkCacheEntry = {
   checkedAt: string
   contentType?: string
   fileName?: string
+  lookupVersion?: number
   provider: ArtworkProvider | 'remote'
   sourceUrl?: string
   status: 'missing' | 'ready'
@@ -240,6 +241,24 @@ type TmdbSearchResponse = {
   results?: TmdbSearchResult[]
 }
 
+type ImdbSuggestionImage = {
+  imageUrl?: string
+}
+
+type ImdbSuggestionResult = {
+  i?: ImdbSuggestionImage
+  id?: string
+  l?: string
+  q?: string
+  qid?: string
+  rank?: number
+  y?: number
+}
+
+type ImdbSuggestionResponse = {
+  d?: ImdbSuggestionResult[]
+}
+
 type TvmazeShow = {
   id?: number
   image?: {
@@ -276,11 +295,13 @@ const BROWSER_PLAYABLE_EXTENSIONS = new Set([
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp']
 const IGNORED_TOP_LEVEL_SOURCES = new Set(['mixes', 'music'])
 const ARTWORK_NAMES = ['poster', 'folder', 'cover', 'artwork']
+const IMDB_SUGGESTION_BASE_URL = 'https://v3.sg.media-imdb.com/suggestion'
 const TMDB_API_BASE_URL = 'https://api.themoviedb.org/3'
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500'
 const TVMAZE_API_BASE_URL = 'https://api.tvmaze.com'
 const REMOTE_METADATA_USER_AGENT =
   'My Home Media Server/0.0.0 (local personal media server)'
+const ARTWORK_LOOKUP_VERSION = 2
 const ARTWORK_FETCH_TIMEOUT_MS = 10_000
 const ARTWORK_MISSING_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_ARTWORK_BYTES = 8 * 1024 * 1024
@@ -2624,6 +2645,7 @@ async function fetchAndCacheRemoteArtwork(
     checkedAt: new Date().toISOString(),
     contentType,
     fileName,
+    lookupVersion: ARTWORK_LOOKUP_VERSION,
     provider: remoteArtwork.provider,
     sourceUrl: remoteArtwork.sourceUrl,
     status: 'ready',
@@ -2638,7 +2660,7 @@ async function fetchAndCacheRemoteArtwork(
 }
 
 async function findRemoteArtwork(target: ArtworkTarget) {
-  const providers = [findTmdbArtwork, findTvmazeArtwork]
+  const providers = [findTmdbArtwork, findImdbArtwork, findTvmazeArtwork]
   let lastError: unknown = null
 
   for (const provider of providers) {
@@ -2658,6 +2680,52 @@ async function findRemoteArtwork(target: ArtworkTarget) {
   }
 
   return null
+}
+
+async function findImdbArtwork(
+  target: ArtworkTarget,
+): Promise<RemoteArtwork | null> {
+  if (target.category !== 'movie') {
+    return null
+  }
+
+  const searchQuery = getImdbSearchQuery(target)
+  const searchUrl = new URL(
+    `${IMDB_SUGGESTION_BASE_URL}/${getImdbSuggestionBucket(
+      searchQuery,
+    )}/${encodeURIComponent(searchQuery)}.json`,
+  )
+
+  const response = await fetchWithTimeout(searchUrl, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': REMOTE_METADATA_USER_AGENT,
+    },
+  })
+
+  if (response.status === 404) {
+    return null
+  }
+
+  if (!response.ok) {
+    throw new Error(`IMDb artwork search failed (${response.status})`)
+  }
+
+  const payload = (await response.json()) as ImdbSuggestionResponse
+  const result = selectImdbArtworkResult(payload.d ?? [], target)
+  const imageUrl = normalizeImdbImageUrl(result?.i?.imageUrl)
+
+  if (!result || !imageUrl) {
+    return null
+  }
+
+  return {
+    imageUrl,
+    provider: 'imdb',
+    sourceUrl: result.id
+      ? `https://www.imdb.com/title/${result.id}/`
+      : 'https://www.imdb.com/',
+  }
 }
 
 async function findTmdbArtwork(
@@ -2749,7 +2817,10 @@ async function findTvmazeArtwork(
     show.image?.medium ?? show.image?.original,
   )
 
-  if (!imageUrl || !isAcceptableArtworkMatch(show.name, show.premiered, target)) {
+  if (
+    !imageUrl ||
+    !isAcceptableArtworkMatch(show.name, getYearFromDate(show.premiered), target)
+  ) {
     return null
   }
 
@@ -2802,6 +2873,7 @@ async function writeMissingArtwork(target: ArtworkTarget) {
     cacheKey: target.cacheKey,
     category: target.category,
     checkedAt: new Date().toISOString(),
+    lookupVersion: ARTWORK_LOOKUP_VERSION,
     provider: 'remote',
     status: 'missing',
     title: target.title,
@@ -2817,6 +2889,24 @@ function selectTmdbArtworkResult(
     .sort(
       (first, second) =>
         scoreTmdbResult(second, target) - scoreTmdbResult(first, target),
+    )[0]
+}
+
+function selectImdbArtworkResult(
+  results: ImdbSuggestionResult[],
+  target: ArtworkTarget,
+) {
+  return results
+    .filter((result) => {
+      return (
+        isImdbMovieResult(result) &&
+        typeof result.i?.imageUrl === 'string' &&
+        isAcceptableArtworkMatch(result.l, getImdbResultYear(result), target)
+      )
+    })
+    .sort(
+      (first, second) =>
+        scoreImdbResult(second, target) - scoreImdbResult(first, target),
     )[0]
 }
 
@@ -2843,6 +2933,36 @@ function scoreTmdbResult(result: TmdbSearchResult, target: ArtworkTarget) {
   return score
 }
 
+function scoreImdbResult(result: ImdbSuggestionResult, target: ArtworkTarget) {
+  const normalizedResultTitle = normalizeArtworkMatchTitle(result.l ?? '')
+  const normalizedTargetTitle = normalizeArtworkMatchTitle(target.searchTitle)
+  const resultYear = getImdbResultYear(result)
+  let score = 1
+
+  if (normalizedResultTitle === normalizedTargetTitle) {
+    score += 10
+  } else if (
+    normalizedResultTitle.includes(normalizedTargetTitle) ||
+    normalizedTargetTitle.includes(normalizedResultTitle)
+  ) {
+    score += 4
+  }
+
+  if (target.year && resultYear === target.year) {
+    score += 6
+  }
+
+  if (result.qid === 'movie' || result.q === 'feature') {
+    score += 4
+  }
+
+  if (typeof result.rank === 'number' && result.rank > 0) {
+    score += Math.max(0, 4 - Math.log10(result.rank))
+  }
+
+  return score
+}
+
 function getTmdbCredentials(): TmdbCredentials | null {
   const bearerToken = process.env.HOME_MEDIA_TMDB_BEARER_TOKEN?.trim()
 
@@ -2856,7 +2976,50 @@ function getTmdbCredentials(): TmdbCredentials | null {
 }
 
 function canCheckRemoteArtwork(target: ArtworkTarget) {
-  return Boolean(getTmdbCredentials()) || target.category === 'show'
+  return (
+    Boolean(getTmdbCredentials()) ||
+    target.category === 'movie' ||
+    target.category === 'show'
+  )
+}
+
+function getImdbSearchQuery(target: ArtworkTarget) {
+  return [target.searchTitle, target.year].filter(Boolean).join(' ')
+}
+
+function getImdbSuggestionBucket(query: string) {
+  return query.match(/[a-z0-9]/i)?.[0].toLowerCase() ?? 'x'
+}
+
+function getImdbResultYear(result: ImdbSuggestionResult): number | null {
+  return Number.isInteger(result.y) ? Number(result.y) : null
+}
+
+function isImdbMovieResult(result: ImdbSuggestionResult) {
+  return result.qid === 'movie' || result.q === 'feature'
+}
+
+function normalizeImdbImageUrl(value: string | undefined) {
+  const imageUrl = normalizeRemoteImageUrl(value)
+
+  if (!imageUrl) {
+    return null
+  }
+
+  try {
+    const url = new URL(imageUrl)
+
+    if (url.hostname.endsWith('media-amazon.com')) {
+      url.pathname = url.pathname.replace(
+        /@\._V1_[^/]*\.jpg$/i,
+        '@._V1_UX500.jpg',
+      )
+    }
+
+    return url.toString()
+  } catch {
+    return imageUrl
+  }
 }
 
 function getTvmazeSourceUrl(showId: number | undefined) {
@@ -2871,6 +3034,7 @@ function getArtworkCacheEntryPath(cacheKey: string) {
 
 function isFreshMissingCache(entry: ArtworkCacheEntry) {
   return (
+    entry.lookupVersion === ARTWORK_LOOKUP_VERSION &&
     Date.now() - new Date(entry.checkedAt).getTime() <
     ARTWORK_MISSING_CACHE_TTL_MS
   )
@@ -2885,7 +3049,10 @@ function isArtworkCacheEntry(value: unknown): value is ArtworkCacheEntry {
     typeof value.cacheKey === 'string' &&
     (value.category === 'movie' || value.category === 'show') &&
     typeof value.checkedAt === 'string' &&
+    (value.lookupVersion === undefined ||
+      typeof value.lookupVersion === 'number') &&
     (value.provider === 'remote' ||
+      value.provider === 'imdb' ||
       value.provider === 'tmdb' ||
       value.provider === 'tvmaze') &&
     (value.status === 'missing' || value.status === 'ready') &&
@@ -2958,7 +3125,7 @@ function normalizeRemoteImageUrl(value: string | undefined) {
 
 function isAcceptableArtworkMatch(
   title: string | undefined,
-  premiered: string | undefined,
+  year: number | null,
   target: ArtworkTarget,
 ) {
   const normalizedResultTitle = normalizeArtworkMatchTitle(title ?? '')
@@ -2968,15 +3135,16 @@ function isAcceptableArtworkMatch(
     return false
   }
 
-  if (
+  const titleMatches =
     normalizedResultTitle === normalizedTargetTitle ||
     normalizedResultTitle.includes(normalizedTargetTitle) ||
     normalizedTargetTitle.includes(normalizedResultTitle)
-  ) {
-    return true
+
+  if (!titleMatches) {
+    return false
   }
 
-  return Boolean(target.year && getYearFromDate(premiered) === target.year)
+  return !target.year || !year || year === target.year
 }
 
 function normalizeArtworkMatchTitle(title: string) {
