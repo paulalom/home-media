@@ -23,6 +23,20 @@ npm run build:tv
 npm run preview:lan
 ```
 
+## Windows Startup
+
+This repo includes Windows helpers for running the LAN dev server:
+
+```powershell
+.\scripts\start-server.ps1
+.\scripts\install-windows-service.ps1
+.\scripts\uninstall-windows-service.ps1
+```
+
+The service installer uses WinSW to create an automatic Windows service named
+`HomeMediaServer`. The service runs `npm run dev:lan` on system start and writes
+its service wrapper files under `.home-media/service`, which is ignored by git.
+
 ## Samsung TV Prototype
 
 This repo includes a Tizen Web app prototype path for Samsung TVs. See [docs/samsung-tv-prototype.md](docs/samsung-tv-prototype.md) for building a `.wgt`, running the media server on your LAN, and installing the app on a developer-mode TV.
