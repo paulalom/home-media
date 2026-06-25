@@ -251,6 +251,24 @@
   padding: 0 12px;
 }
 
+.server-settings input[type='checkbox'] {
+  accent-color: #0f766e;
+  min-height: 0;
+  width: 18px;
+}
+
+.settings-toggle {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
+.settings-toggle span {
+  color: var(--text-strong);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
 .settings-actions {
   display: flex;
   gap: 8px;

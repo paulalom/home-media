@@ -1340,7 +1340,7 @@ function TvApp() {
   }
 
   function startPlayback(item: MediaItem | null) {
-    if (!item?.browserPlayable) {
+    if (!item) {
       return
     }
 
@@ -2205,7 +2205,7 @@ function TvApp() {
           }}
           playsInline
           ref={playerRef}
-          src={resolveMediaUrl(playerItem.streamUrl, apiBase)}
+          src={getPlaybackStreamUrl(playerItem, apiBase)}
         />
         {playerBlackoutVisible ? (
           <div className="tv-player-blackout" aria-hidden="true" />
@@ -2614,7 +2614,7 @@ function TvApp() {
           </div>
           <button
             className="tv-primary-action"
-            disabled={!selectedItem?.browserPlayable}
+            disabled={!selectedItem}
             onClick={() => activateTitle(activeSection, selectedTitle)}
             type="button"
           >
@@ -2836,10 +2836,7 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
     (episode) => episode.id === watchedEpisode.id,
   )
 
-  return (
-    episodes.slice(watchedIndex + 1).find((episode) => episode.browserPlayable) ??
-    watchedEpisode
-  )
+  return episodes[watchedIndex + 1] ?? watchedEpisode
 }
 
 function getPlayerEpisodeSwitchOptions(
@@ -2856,7 +2853,6 @@ function getPlayerEpisodeSwitchOptions(
     .filter(
       (item) =>
         item.category === 'show' &&
-        item.browserPlayable &&
         getShowGroupKey(item) === currentShowKey,
     )
     .sort(sortEpisodes)
@@ -3088,6 +3084,17 @@ function resolveMediaUrl(streamUrl: string, apiBase: string) {
   }
 
   return buildApiUrl(streamUrl, apiBase)
+}
+
+function getPlaybackStreamUrl(item: MediaItem, apiBase: string) {
+  if (item.browserPlayable) {
+    return resolveMediaUrl(item.streamUrl, apiBase)
+  }
+
+  return resolveMediaUrl(
+    `/api/media/${encodeURIComponent(item.id)}/transcode`,
+    apiBase,
+  )
 }
 
 function getMediaPreviewVersion(item: MediaItem) {
@@ -3977,7 +3984,7 @@ function getDetailPlaybackLabel(
   playback: PlaybackRecord | null,
 ) {
   if (!item.browserPlayable) {
-    return `${item.container} indexed`
+    return `${item.container} transcode on play`
   }
 
   if (!playback) {

@@ -173,6 +173,26 @@ type PreviewCacheStatus = {
   warmMode: PreviewCacheWarmMode
 }
 
+type TranscodeCacheState = 'clearing' | 'idle' | 'warming'
+
+type TranscodeCacheStatus = {
+  cacheBytes: number
+  cacheFiles: number
+  cacheRoot: string
+  cacheSizeLabel: string
+  cachedVideos: number
+  completedVideos: number
+  currentTitle?: string
+  failedVideos: number
+  generatedVideos: number
+  lastError?: string
+  pendingVideos: number
+  state: TranscodeCacheState
+  target: string
+  totalVideos: number
+  updatedAt: string
+}
+
 type PreviewFrameQuality = keyof typeof PREVIEW_FRAME_SETTINGS
 
 type PreviewCacheWarmMode = 'background' | 'foreground'
@@ -180,6 +200,16 @@ type PreviewCacheWarmMode = 'background' | 'foreground'
 type PreviewCacheWarmRequest = {
   library: LibraryResponse
   mode: PreviewCacheWarmMode
+}
+
+type TranscodeCacheWarmRequest = {
+  library: LibraryResponse
+}
+
+type TranscodeTarget = {
+  cachePath: string
+  mediaPath: string
+  stats: Stats
 }
 
 type PreviewFrameGenerationOptions = {
@@ -274,6 +304,7 @@ const DEFAULT_MEDIA_ROOT = 'F:/media'
 const DEFAULT_FILE_SHARE_DIRECTORY_NAME = 'Desktop'
 const ARTWORK_CACHE_DIRECTORY_NAME = 'My Home Media Server'
 const PREVIEW_FRAME_CACHE_DIRECTORY_NAME = 'preview-frames'
+const TRANSCODE_CACHE_DIRECTORY_NAME = 'encoded-videos'
 const VIDEO_EXTENSIONS = new Set([
   '.avi',
   '.divx',
@@ -336,6 +367,8 @@ const PREVIEW_SPRITE_COLUMNS = 10
 const PREVIEW_SPRITE_ROWS = 6
 const PREVIEW_SPRITE_FRAMES_PER_SHEET =
   PREVIEW_SPRITE_COLUMNS * PREVIEW_SPRITE_ROWS
+const TRANSCODE_CACHE_BACKGROUND_COOLDOWN_MS = 2_000
+const TRANSCODE_TARGET_LABEL = 'MP4 H.264/AAC'
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -403,12 +436,18 @@ const MAX_JSON_BODY_BYTES = 64 * 1024
 let libraryCache: LibraryCache | null = null
 const artworkFetches = new Map<string, Promise<ResolvedArtwork | null>>()
 const previewCacheActiveWarmFrames = new Set<Promise<void>>()
+const transcodeCacheActiveWarmVideos = new Set<Promise<void>>()
 let previewCacheWarmMode: PreviewCacheWarmMode = 'background'
 let previewCacheStatus = createInitialPreviewCacheStatus()
 let previewCacheWarmRequest: PreviewCacheWarmRequest | null = null
 let previewCacheWarmRunId = 0
 let previewCacheWarmRunning = false
+let transcodeCacheStatus = createInitialTranscodeCacheStatus()
+let transcodeCacheWarmRequest: TranscodeCacheWarmRequest | null = null
+let transcodeCacheWarmRunId = 0
+let transcodeCacheWarmRunning = false
 const previewFrameFetches = new Map<string, Promise<string>>()
+const transcodeCacheEncodes = new Map<string, Promise<string>>()
 
 export function getMediaRoot() {
   return process.env.HOME_MEDIA_ROOT ?? DEFAULT_MEDIA_ROOT
@@ -455,6 +494,28 @@ export function getPreviewFrameCacheRoot() {
         homedir(),
         '.my-home-media-server',
         PREVIEW_FRAME_CACHE_DIRECTORY_NAME,
+      )
+}
+
+export function getTranscodeCacheRoot() {
+  const configuredRoot = process.env.HOME_MEDIA_TRANSCODE_CACHE_ROOT?.trim()
+
+  if (configuredRoot) {
+    return resolve(configuredRoot)
+  }
+
+  const localAppData = process.env.LOCALAPPDATA?.trim()
+
+  return localAppData
+    ? resolve(
+        localAppData,
+        ARTWORK_CACHE_DIRECTORY_NAME,
+        TRANSCODE_CACHE_DIRECTORY_NAME,
+      )
+    : resolve(
+        homedir(),
+        '.my-home-media-server',
+        TRANSCODE_CACHE_DIRECTORY_NAME,
       )
 }
 
@@ -624,9 +685,10 @@ export async function handleMediaApi(
     url.pathname === '/api/library' ||
     url.pathname === '/api/playback' ||
     url.pathname === '/api/preview-cache' ||
+    url.pathname === '/api/transcode-cache' ||
     /^\/api\/files\/[^/]+\/download$/.test(url.pathname) ||
     /^\/api\/playback\/[^/]+$/.test(url.pathname) ||
-    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|preview-sheet|preview-sprite|stream)$/.test(
+    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|preview-sheet|preview-sprite|stream|transcode)$/.test(
       url.pathname,
     )
 
@@ -702,6 +764,43 @@ export async function handleMediaApi(
       try {
         await clearPreviewCache()
         sendJson(res, await getPreviewCacheStatus())
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    sendMethodNotAllowed(res, ['DELETE', 'GET', 'POST'])
+    return true
+  }
+
+  if (url.pathname === '/api/transcode-cache') {
+    if (req.method === 'GET') {
+      try {
+        sendJson(res, await getTranscodeCacheStatus())
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    if (req.method === 'POST') {
+      try {
+        ensureTranscodeCacheWarm(await getCachedLibrary(false, null))
+        sendJson(res, await getTranscodeCacheStatus())
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    if (req.method === 'DELETE') {
+      try {
+        await clearTranscodeCache()
+        sendJson(res, await getTranscodeCacheStatus())
       } catch (error) {
         sendError(res, getErrorStatusCode(error), getErrorMessage(error))
       }
@@ -803,6 +902,25 @@ export async function handleMediaApi(
       await streamMedia(streamMatch[1], req, res)
     } catch (error) {
       sendError(res, 500, getErrorMessage(error))
+    }
+
+    return true
+  }
+
+  const transcodeMatch = /^\/api\/media\/([^/]+)\/transcode$/.exec(
+    url.pathname,
+  )
+
+  if (transcodeMatch) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      sendMethodNotAllowed(res, ['GET', 'HEAD'])
+      return true
+    }
+
+    try {
+      await streamTranscodedMedia(transcodeMatch[1], req, res)
+    } catch (error) {
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
     }
 
     return true
@@ -1188,6 +1306,227 @@ function createInitialPreviewCacheStatus(
     updatedAt: new Date().toISOString(),
     width: PREVIEW_FRAME_SETTINGS[PREVIEW_CACHE_QUALITY].width,
   }
+}
+
+function ensureTranscodeCacheWarm(library: LibraryResponse) {
+  transcodeCacheWarmRequest = {
+    library,
+  }
+
+  if (transcodeCacheStatus.state === 'idle') {
+    transcodeCacheStatus = {
+      ...transcodeCacheStatus,
+      state: 'warming',
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  if (!transcodeCacheWarmRunning) {
+    void runTranscodeCacheWarmLoop().catch((error: unknown) => {
+      transcodeCacheStatus = {
+        ...transcodeCacheStatus,
+        lastError: getErrorMessage(error),
+        state: 'idle',
+        updatedAt: new Date().toISOString(),
+      }
+      transcodeCacheWarmRunning = false
+    })
+  }
+}
+
+async function runTranscodeCacheWarmLoop() {
+  if (transcodeCacheWarmRunning) {
+    return
+  }
+
+  transcodeCacheWarmRunning = true
+
+  try {
+    while (transcodeCacheWarmRequest) {
+      const request = transcodeCacheWarmRequest
+      const runId = ++transcodeCacheWarmRunId
+
+      transcodeCacheWarmRequest = null
+      await warmTranscodeCache(request.library, runId)
+    }
+  } finally {
+    transcodeCacheWarmRunning = false
+
+    if (transcodeCacheWarmRequest) {
+      const request = transcodeCacheWarmRequest
+
+      ensureTranscodeCacheWarm(request.library)
+    }
+  }
+}
+
+async function warmTranscodeCache(library: LibraryResponse, runId: number) {
+  const candidates = library.items.filter((item) => !item.browserPlayable)
+
+  transcodeCacheStatus = {
+    ...createInitialTranscodeCacheStatus('warming'),
+    pendingVideos: candidates.length,
+    totalVideos: candidates.length,
+    updatedAt: new Date().toISOString(),
+  }
+
+  for (const item of candidates) {
+    if (runId !== transcodeCacheWarmRunId) {
+      return
+    }
+
+    transcodeCacheStatus = {
+      ...transcodeCacheStatus,
+      currentTitle: getMediaItemDisplayTitle(item),
+      updatedAt: new Date().toISOString(),
+    }
+
+    try {
+      const target = await getTranscodeTarget(item.id)
+
+      if (await isFile(target.cachePath)) {
+        markTranscodeCacheVideoCached()
+        continue
+      }
+
+      await trackActiveTranscodeCacheWarm(
+        encodeTranscodeCacheFile(target),
+      )
+
+      if (runId !== transcodeCacheWarmRunId) {
+        return
+      }
+
+      markTranscodeCacheVideoGenerated()
+      await throttleTranscodeCacheWarm(runId)
+    } catch (error) {
+      if (runId !== transcodeCacheWarmRunId) {
+        return
+      }
+
+      markTranscodeCacheVideoFailed(getErrorMessage(error))
+    }
+  }
+
+  if (runId === transcodeCacheWarmRunId) {
+    transcodeCacheStatus = {
+      ...transcodeCacheStatus,
+      currentTitle: undefined,
+      state: 'idle',
+      updatedAt: new Date().toISOString(),
+    }
+  }
+}
+
+async function getTranscodeCacheStatus(): Promise<TranscodeCacheStatus> {
+  const directoryStats = await getDirectoryStats(getTranscodeCacheRoot())
+
+  return {
+    ...transcodeCacheStatus,
+    cacheBytes: directoryStats.bytes,
+    cacheFiles: directoryStats.files,
+    cacheRoot: getTranscodeCacheRoot(),
+    cacheSizeLabel: formatBytes(directoryStats.bytes),
+  }
+}
+
+async function clearTranscodeCache() {
+  const cacheRoot = getTranscodeCacheRoot()
+
+  assertSafeTranscodeCacheRoot(cacheRoot)
+  transcodeCacheWarmRequest = null
+  transcodeCacheWarmRunId += 1
+  transcodeCacheEncodes.clear()
+  transcodeCacheStatus = {
+    ...createInitialTranscodeCacheStatus('clearing'),
+    updatedAt: new Date().toISOString(),
+  }
+
+  await Promise.allSettled([...transcodeCacheActiveWarmVideos])
+
+  await fs.rm(cacheRoot, { force: true, recursive: true })
+  await fs.mkdir(cacheRoot, { recursive: true })
+
+  transcodeCacheStatus = {
+    ...createInitialTranscodeCacheStatus('idle'),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function createInitialTranscodeCacheStatus(
+  state: TranscodeCacheState = 'idle',
+): TranscodeCacheStatus {
+  const cacheRoot = getTranscodeCacheRoot()
+
+  return {
+    cacheBytes: 0,
+    cacheFiles: 0,
+    cacheRoot,
+    cacheSizeLabel: formatBytes(0),
+    cachedVideos: 0,
+    completedVideos: 0,
+    failedVideos: 0,
+    generatedVideos: 0,
+    pendingVideos: 0,
+    state,
+    target: TRANSCODE_TARGET_LABEL,
+    totalVideos: 0,
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+async function trackActiveTranscodeCacheWarm<T>(promise: Promise<T>) {
+  const trackedPromise = promise.then(
+    () => undefined,
+    () => undefined,
+  )
+
+  transcodeCacheActiveWarmVideos.add(trackedPromise)
+
+  try {
+    return await promise
+  } finally {
+    transcodeCacheActiveWarmVideos.delete(trackedPromise)
+  }
+}
+
+function markTranscodeCacheVideoCached() {
+  transcodeCacheStatus = {
+    ...transcodeCacheStatus,
+    cachedVideos: transcodeCacheStatus.cachedVideos + 1,
+    completedVideos: transcodeCacheStatus.completedVideos + 1,
+    pendingVideos: Math.max(transcodeCacheStatus.pendingVideos - 1, 0),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function markTranscodeCacheVideoGenerated() {
+  transcodeCacheStatus = {
+    ...transcodeCacheStatus,
+    completedVideos: transcodeCacheStatus.completedVideos + 1,
+    generatedVideos: transcodeCacheStatus.generatedVideos + 1,
+    pendingVideos: Math.max(transcodeCacheStatus.pendingVideos - 1, 0),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function markTranscodeCacheVideoFailed(message: string) {
+  transcodeCacheStatus = {
+    ...transcodeCacheStatus,
+    completedVideos: transcodeCacheStatus.completedVideos + 1,
+    failedVideos: transcodeCacheStatus.failedVideos + 1,
+    lastError: message,
+    pendingVideos: Math.max(transcodeCacheStatus.pendingVideos - 1, 0),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+async function throttleTranscodeCacheWarm(runId: number) {
+  if (runId !== transcodeCacheWarmRunId) {
+    return
+  }
+
+  await sleep(TRANSCODE_CACHE_BACKGROUND_COOLDOWN_MS)
 }
 
 function getPreviewCacheWarmStatusFields(mode: PreviewCacheWarmMode) {
@@ -2109,6 +2448,250 @@ function getPreviewSpriteSheetTimeout() {
   )
 }
 
+function encodeTranscodeCacheFile(target: TranscodeTarget) {
+  const existingEncode = transcodeCacheEncodes.get(target.cachePath)
+
+  if (existingEncode) {
+    return existingEncode
+  }
+
+  const encodePromise = encodeTranscodeFile(target)
+    .then(() => target.cachePath)
+    .finally(() => {
+      if (transcodeCacheEncodes.get(target.cachePath) === encodePromise) {
+        transcodeCacheEncodes.delete(target.cachePath)
+      }
+    })
+
+  transcodeCacheEncodes.set(target.cachePath, encodePromise)
+
+  return encodePromise
+}
+
+async function encodeTranscodeFile(target: TranscodeTarget) {
+  if (await isFile(target.cachePath)) {
+    return
+  }
+
+  const tempPath = `${target.cachePath}.${Date.now()}.${Math.random()
+    .toString(16)
+    .slice(2)}.tmp.mp4`
+
+  await fs.mkdir(dirname(target.cachePath), { recursive: true })
+
+  try {
+    await runFfmpegToFile(target.mediaPath, tempPath)
+    await moveTranscodeFileIntoCache(tempPath, target.cachePath)
+  } catch (error) {
+    await fs.rm(tempPath, { force: true })
+    throw error
+  }
+}
+
+async function moveTranscodeFileIntoCache(
+  tempPath: string,
+  cachePath: string,
+) {
+  if (await isFile(cachePath)) {
+    await fs.rm(tempPath, { force: true })
+    return
+  }
+
+  await fs.mkdir(dirname(cachePath), { recursive: true })
+
+  try {
+    await fs.rename(tempPath, cachePath)
+  } catch (error) {
+    if (await isFile(cachePath)) {
+      await fs.rm(tempPath, { force: true })
+      return
+    }
+
+    throw error
+  }
+}
+
+function runFfmpegToFile(mediaPath: string, outputPath: string) {
+  return new Promise<void>((resolvePromise, rejectPromise) => {
+    const ffmpeg = spawn(
+      getFfmpegExecutable(),
+      [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-y',
+        '-i',
+        mediaPath,
+        ...getTranscodeOutputArgs(),
+        '-movflags',
+        '+faststart',
+        '-f',
+        'mp4',
+        outputPath,
+      ],
+      {
+        windowsHide: true,
+      },
+    )
+    const errorChunks: Buffer[] = []
+    let settled = false
+
+    function finish(error?: Error) {
+      if (settled) {
+        return
+      }
+
+      settled = true
+
+      if (error) {
+        rejectPromise(error)
+        return
+      }
+
+      resolvePromise()
+    }
+
+    ffmpeg.stderr.on('data', (chunk: Buffer) => {
+      errorChunks.push(chunk)
+    })
+
+    ffmpeg.on('error', (error) => {
+      finish(error)
+    })
+
+    ffmpeg.on('close', (code) => {
+      if (settled) {
+        return
+      }
+
+      if (code === 0) {
+        finish()
+        return
+      }
+
+      const stderr = Buffer.concat(errorChunks).toString('utf8').trim()
+      const message = stderr
+        ? `Video encoding failed: ${stderr}`
+        : `Video encoding failed (${code ?? 'unknown exit'})`
+
+      finish(new Error(message))
+    })
+  })
+}
+
+function streamFfmpegTranscode(
+  mediaPath: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+) {
+  if (req.method === 'HEAD') {
+    res.writeHead(200, getTranscodeStreamHeaders('no-store'))
+    res.end()
+    return
+  }
+
+  const ffmpeg = spawn(
+    getFfmpegExecutable(),
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-i',
+      mediaPath,
+      ...getTranscodeOutputArgs(),
+      '-movflags',
+      'frag_keyframe+empty_moov+default_base_moof',
+      '-f',
+      'mp4',
+      'pipe:1',
+    ],
+    {
+      windowsHide: true,
+    },
+  )
+  const errorChunks: Buffer[] = []
+  let clientClosed = false
+
+  function stopTranscode() {
+    clientClosed = true
+
+    if (!ffmpeg.killed) {
+      ffmpeg.kill()
+    }
+  }
+
+  res.writeHead(200, getTranscodeStreamHeaders('no-store'))
+
+  req.on('close', stopTranscode)
+  res.on('close', stopTranscode)
+
+  ffmpeg.stdout.pipe(res)
+
+  ffmpeg.stderr.on('data', (chunk: Buffer) => {
+    errorChunks.push(chunk)
+  })
+
+  ffmpeg.on('error', (error) => {
+    if (!res.writableEnded) {
+      res.destroy(error)
+    }
+  })
+
+  ffmpeg.on('close', () => {
+    req.off('close', stopTranscode)
+    res.off('close', stopTranscode)
+
+    if (clientClosed) {
+      return
+    }
+
+    if (!res.writableEnded) {
+      const stderr = Buffer.concat(errorChunks).toString('utf8').trim()
+
+      if (stderr) {
+        res.destroy(new Error(`Video transcode failed: ${stderr}`))
+        return
+      }
+
+      res.end()
+    }
+  })
+}
+
+function getTranscodeOutputArgs() {
+  return [
+    '-map',
+    '0:v:0',
+    '-map',
+    '0:a:0?',
+    '-sn',
+    '-dn',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'veryfast',
+    '-crf',
+    '21',
+    '-pix_fmt',
+    'yuv420p',
+    '-c:a',
+    'aac',
+    '-b:a',
+    '160k',
+    '-ac',
+    '2',
+  ]
+}
+
+function getTranscodeStreamHeaders(cacheControl: string) {
+  return {
+    ...API_CORS_HEADERS,
+    'Accept-Ranges': 'none',
+    'Cache-Control': cacheControl,
+    'Content-Type': 'video/mp4',
+  }
+}
+
 function getPreviewFrameQuality(value: string | null): PreviewFrameQuality {
   return value === 'high' ? 'high' : 'low'
 }
@@ -2403,6 +2986,37 @@ function assertSafePreviewCacheRoot(cacheRoot: string) {
 
   if (isPathInside(resolvedCacheRoot, mediaRoot)) {
     throw new Error('Preview cache folder cannot contain the media library')
+  }
+}
+
+function assertSafeTranscodeCacheRoot(cacheRoot: string) {
+  const resolvedCacheRoot = resolve(cacheRoot)
+  const parent = dirname(resolvedCacheRoot)
+
+  if (parent === resolvedCacheRoot) {
+    throw new Error('Encoded video cache folder cannot be a filesystem root')
+  }
+
+  const protectedRoots = [
+    homedir(),
+    process.env.LOCALAPPDATA?.trim(),
+  ].filter((value): value is string => Boolean(value))
+
+  if (
+    protectedRoots.some((protectedRoot) => {
+      return resolve(protectedRoot) === resolvedCacheRoot
+    })
+  ) {
+    throw new Error('Encoded video cache folder is too broad to clear')
+  }
+
+  const mediaRoot = resolve(getMediaRoot())
+
+  if (
+    isPathInside(mediaRoot, resolvedCacheRoot) ||
+    isPathInside(resolvedCacheRoot, mediaRoot)
+  ) {
+    throw new Error('Encoded video cache folder cannot overlap the media library')
   }
 }
 
@@ -3202,6 +3816,118 @@ async function streamMedia(
     cacheControl: 'no-store',
     contentType: mimeType,
   })
+}
+
+async function streamTranscodedMedia(
+  mediaId: string,
+  req: IncomingMessage,
+  res: ServerResponse,
+) {
+  const target = await getTranscodeTarget(mediaId)
+
+  if (await isFile(target.cachePath)) {
+    const cacheStats = await fs.stat(target.cachePath)
+
+    streamFileContent(target.cachePath, cacheStats, req, res, {
+      cacheControl: 'public, max-age=604800, immutable',
+      contentType: 'video/mp4',
+    })
+    return
+  }
+
+  streamFfmpegTranscode(target.mediaPath, req, res)
+}
+
+async function getTranscodeTarget(mediaId: string): Promise<TranscodeTarget> {
+  const mediaPath = getMediaPath(mediaId)
+
+  if (!mediaPath) {
+    throw createHttpError(404, 'Media not found')
+  }
+
+  const extension = extname(mediaPath).toLowerCase()
+
+  if (!VIDEO_EXTENSIONS.has(extension)) {
+    throw createHttpError(415, 'Unsupported media type')
+  }
+
+  let stats: Stats
+
+  try {
+    stats = await fs.stat(mediaPath)
+  } catch {
+    throw createHttpError(404, 'Media not found')
+  }
+
+  if (!stats.isFile()) {
+    throw createHttpError(404, 'Media not found')
+  }
+
+  return {
+    cachePath: getTranscodeCachePath(mediaId, mediaPath, stats),
+    mediaPath,
+    stats,
+  }
+}
+
+function getTranscodeCachePath(
+  mediaId: string,
+  mediaPath: string,
+  stats: Stats,
+) {
+  return join(
+    getTranscodeCacheDirectory(mediaId, mediaPath),
+    `${createPreviewMediaVersionKey(mediaId, stats)}.mp4`,
+  )
+}
+
+function getTranscodeCacheDirectory(mediaId: string, mediaPath: string) {
+  const relativePath = decodeMediaId(mediaId) ?? basename(mediaPath)
+  const filename = basename(mediaPath)
+  const extension = extname(mediaPath)
+  const metadata = getMediaMetadata(relativePath, filename, extension)
+  const sourceName = getSourceName(relativePath)
+  const filenameTitle = cleanTitle(basename(filename, extension))
+
+  if (metadata.category === 'show') {
+    const seasonLabel = metadata.seasonNumber
+      ? `Season ${String(metadata.seasonNumber).padStart(2, '0')}`
+      : 'Season Unknown'
+    const episodeCode =
+      metadata.seasonNumber && metadata.episodeNumber
+        ? `S${String(metadata.seasonNumber).padStart(2, '0')}E${String(
+            metadata.episodeNumber,
+          ).padStart(2, '0')}`
+        : ''
+    const episodeTitle =
+      episodeCode && metadata.title === `Episode ${metadata.episodeNumber}`
+        ? episodeCode
+        : cleanTitle(`${episodeCode} ${metadata.title}`.trim()) || filenameTitle
+
+    return join(
+      getTranscodeCacheRoot(),
+      'TV Shows',
+      sanitizePreviewCacheSegment(metadata.showTitle ?? sourceName),
+      sanitizePreviewCacheSegment(seasonLabel),
+      sanitizePreviewCacheSegment(episodeTitle),
+    )
+  }
+
+  if (metadata.category === 'movie') {
+    return join(
+      getTranscodeCacheRoot(),
+      'Movies',
+      sanitizePreviewCacheSegment(metadata.title),
+      sanitizePreviewCacheSegment(filenameTitle),
+    )
+  }
+
+  return join(
+    getTranscodeCacheRoot(),
+    'Other',
+    sanitizePreviewCacheSegment(sourceName),
+    sanitizePreviewCacheSegment(filenameTitle),
+  )
 }
 
 async function streamSharedFile(

@@ -138,6 +138,24 @@ type PreviewCacheStatus = {
   warmMode: 'background' | 'foreground'
 }
 
+type TranscodeCacheStatus = {
+  cacheBytes: number
+  cacheFiles: number
+  cacheRoot: string
+  cacheSizeLabel: string
+  cachedVideos: number
+  completedVideos: number
+  currentTitle?: string
+  failedVideos: number
+  generatedVideos: number
+  lastError?: string
+  pendingVideos: number
+  state: 'clearing' | 'idle' | 'warming'
+  target: string
+  totalVideos: number
+  updatedAt: string
+}
+
 type MovieTitle = {
   id: string
   kind: 'movie'
@@ -197,6 +215,7 @@ type MyHomeMediaServerWindow = Window & {
 }
 
 const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
+const autoEncodeStorageKey = 'my-home-media-server-auto-encode-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
 const viewModes: MediaViewMode[] = ['Home', 'Movies', 'TV Shows']
 
@@ -266,6 +285,22 @@ async function fetchPreviewCacheStatus(
   return (await response.json()) as PreviewCacheStatus
 }
 
+async function fetchTranscodeCacheStatus(
+  apiBase: string,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(buildApiUrl('/api/transcode-cache', apiBase), {
+    cache: 'no-store',
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Encoded video cache status failed (${response.status})`)
+  }
+
+  return (await response.json()) as TranscodeCacheStatus
+}
+
 async function startPreviewCacheWarm(apiBase: string) {
   const response = await fetch(buildApiUrl('/api/preview-cache', apiBase), {
     cache: 'no-store',
@@ -277,6 +312,19 @@ async function startPreviewCacheWarm(apiBase: string) {
   }
 
   return (await response.json()) as PreviewCacheStatus
+}
+
+async function startTranscodeCacheWarm(apiBase: string) {
+  const response = await fetch(buildApiUrl('/api/transcode-cache', apiBase), {
+    cache: 'no-store',
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Encoded video cache warm failed (${response.status})`)
+  }
+
+  return (await response.json()) as TranscodeCacheStatus
 }
 
 async function clearPreviewCache(apiBase: string) {
@@ -292,6 +340,19 @@ async function clearPreviewCache(apiBase: string) {
   return (await response.json()) as PreviewCacheStatus
 }
 
+async function clearTranscodeCache(apiBase: string) {
+  const response = await fetch(buildApiUrl('/api/transcode-cache', apiBase), {
+    cache: 'no-store',
+    method: 'DELETE',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Encoded video cache clear failed (${response.status})`)
+  }
+
+  return (await response.json()) as TranscodeCacheStatus
+}
+
 function App() {
   const [apiBase, setApiBase] = useState(readInitialApiBase)
   const [apiBaseDraft, setApiBaseDraft] = useState(apiBase)
@@ -305,6 +366,9 @@ function App() {
   const [filesLoading, setFilesLoading] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
   const [library, setLibrary] = useState<LibraryResponse | null>(null)
+  const [autoEncodeEnabled, setAutoEncodeEnabled] = useState(
+    readAutoEncodeEnabled,
+  )
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
     readLocalPlaybackHistory,
   )
@@ -312,6 +376,10 @@ function App() {
     useState(false)
   const [previewCacheStatus, setPreviewCacheStatus] =
     useState<PreviewCacheStatus | null>(null)
+  const [transcodeCacheActionRunning, setTranscodeCacheActionRunning] =
+    useState(false)
+  const [transcodeCacheStatus, setTranscodeCacheStatus] =
+    useState<TranscodeCacheStatus | null>(null)
   const [mediaQuery, setMediaQuery] = useState('')
   const [scanRunning, setScanRunning] = useState(false)
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(
@@ -321,6 +389,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const playbackHistoryRef = useRef(playbackHistory)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
+  const lastAutoEncodeWarmKeyRef = useRef('')
   const playerRef = useRef<HTMLVideoElement | null>(null)
 
   useEffect(() => {
@@ -366,6 +435,13 @@ function App() {
   }, [apiBase])
 
   useEffect(() => {
+    window.localStorage.setItem(
+      autoEncodeStorageKey,
+      autoEncodeEnabled ? '1' : '0',
+    )
+  }, [autoEncodeEnabled])
+
+  useEffect(() => {
     const controller = new AbortController()
 
     fetchLibrary(apiBase, controller.signal)
@@ -398,6 +474,37 @@ function App() {
 
     return () => controller.abort()
   }, [apiBase])
+
+  useEffect(() => {
+    if (!autoEncodeEnabled || !library) {
+      return
+    }
+
+    const unplayableCount = library.items.filter(
+      (item) => !item.browserPlayable,
+    ).length
+
+    if (unplayableCount === 0) {
+      return
+    }
+
+    const warmKey = [
+      apiBase,
+      library.summary.scannedAt,
+      library.summary.totalVideos,
+      unplayableCount,
+    ].join(':')
+
+    if (lastAutoEncodeWarmKeyRef.current === warmKey) {
+      return
+    }
+
+    lastAutoEncodeWarmKeyRef.current = warmKey
+
+    void startTranscodeCacheWarm(apiBase)
+      .then(setTranscodeCacheStatus)
+      .catch((requestError: unknown) => setError(getErrorMessage(requestError)))
+  }, [apiBase, autoEncodeEnabled, library])
 
   useEffect(() => {
     if (activeView !== 'Files') {
@@ -446,9 +553,13 @@ function App() {
     }
 
     function loadStatus() {
-      fetchPreviewCacheStatus(apiBase, controller.signal)
-        .then((nextStatus) => {
-          setPreviewCacheStatus(nextStatus)
+      Promise.all([
+        fetchPreviewCacheStatus(apiBase, controller.signal),
+        fetchTranscodeCacheStatus(apiBase, controller.signal),
+      ])
+        .then(([nextPreviewStatus, nextTranscodeStatus]) => {
+          setPreviewCacheStatus(nextPreviewStatus)
+          setTranscodeCacheStatus(nextTranscodeStatus)
 
           if (!controller.signal.aborted) {
             scheduleRefresh()
@@ -780,6 +891,32 @@ function App() {
     }
   }
 
+  async function warmTranscodeCache() {
+    setTranscodeCacheActionRunning(true)
+    setError(null)
+
+    try {
+      setTranscodeCacheStatus(await startTranscodeCacheWarm(apiBase))
+    } catch (requestError) {
+      setError(getErrorMessage(requestError))
+    } finally {
+      setTranscodeCacheActionRunning(false)
+    }
+  }
+
+  async function removeTranscodeCache() {
+    setTranscodeCacheActionRunning(true)
+    setError(null)
+
+    try {
+      setTranscodeCacheStatus(await clearTranscodeCache(apiBase))
+    } catch (requestError) {
+      setError(getErrorMessage(requestError))
+    } finally {
+      setTranscodeCacheActionRunning(false)
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -914,6 +1051,85 @@ function App() {
                     This host
                   </button>
                 </div>
+                <section
+                  className="settings-section"
+                  aria-label="Encoded video cache"
+                >
+                  <div className="settings-heading">
+                    <span>Encoded video cache</span>
+                    <strong>
+                      {transcodeCacheStatus
+                        ? formatTranscodeCacheState(transcodeCacheStatus)
+                        : 'Loading'}
+                    </strong>
+                  </div>
+                  <label className="settings-toggle">
+                    <input
+                      checked={autoEncodeEnabled}
+                      onChange={(event) =>
+                        setAutoEncodeEnabled(event.target.checked)
+                      }
+                      type="checkbox"
+                    />
+                    <span>Automatically encode unsupported videos</span>
+                  </label>
+                  <p
+                    className="settings-path"
+                    title={transcodeCacheStatus?.cacheRoot}
+                  >
+                    {transcodeCacheStatus?.cacheRoot ?? 'Checking cache folder'}
+                  </p>
+                  <div className="settings-metrics">
+                    <span>
+                      {transcodeCacheStatus?.cacheSizeLabel ?? '0 B'} /{' '}
+                      {formatNumber(transcodeCacheStatus?.cacheFiles ?? 0)} files
+                    </span>
+                    <span>
+                      {formatNumber(
+                        (transcodeCacheStatus?.cachedVideos ?? 0) +
+                          (transcodeCacheStatus?.generatedVideos ?? 0),
+                      )}{' '}
+                      / {formatNumber(transcodeCacheStatus?.totalVideos ?? 0)}{' '}
+                      videos
+                    </span>
+                    <span>
+                      Target: {transcodeCacheStatus?.target ?? 'MP4 H.264/AAC'}
+                    </span>
+                  </div>
+                  {transcodeCacheStatus?.currentTitle ? (
+                    <p className="settings-note">
+                      {transcodeCacheStatus.currentTitle}
+                    </p>
+                  ) : null}
+                  {transcodeCacheStatus?.lastError ? (
+                    <p className="settings-error">
+                      {transcodeCacheStatus.lastError}
+                    </p>
+                  ) : null}
+                  <div className="settings-actions">
+                    <button
+                      className="secondary-button subtle"
+                      disabled={
+                        transcodeCacheActionRunning ||
+                        transcodeCacheStatus?.state === 'clearing'
+                      }
+                      onClick={warmTranscodeCache}
+                      type="button"
+                    >
+                      <RefreshCcw size={16} />
+                      Encode
+                    </button>
+                    <button
+                      className="secondary-button danger"
+                      disabled={transcodeCacheActionRunning}
+                      onClick={removeTranscodeCache}
+                      type="button"
+                    >
+                      <Trash2 size={16} />
+                      Clear
+                    </button>
+                  </div>
+                </section>
                 <section className="settings-section" aria-label="Preview cache">
                   <div className="settings-heading">
                     <span>Preview cache</span>
@@ -1160,7 +1376,6 @@ function App() {
                   <div className="main-player-actions">
                     <button
                       className="secondary-button"
-                      disabled={!selectedItem.browserPlayable}
                       onClick={playSelectedItem}
                       type="button"
                     >
@@ -1169,7 +1384,6 @@ function App() {
                     </button>
                     <button
                       className="icon-button"
-                      disabled={!selectedItem.browserPlayable}
                       onClick={fullscreenSelectedItem}
                       title="Fullscreen"
                       type="button"
@@ -1187,34 +1401,26 @@ function App() {
                     title={selectedTitle.title}
                   />
                   <div className="main-player-stage">
-                    {selectedItem.browserPlayable ? (
-                      <video
-                        className="main-media-player"
-                        controls
-                        key={selectedItem.id}
-                        onEnded={(event) =>
-                          recordPlayback(selectedItem, event.currentTarget, true)
-                        }
-                        onLoadedMetadata={(event) =>
-                          handleLoadedMetadata(selectedItem, event)
-                        }
-                        onPause={(event) =>
-                          recordPlayback(selectedItem, event.currentTarget, true)
-                        }
-                        onTimeUpdate={(event) =>
-                          recordPlayback(selectedItem, event.currentTarget)
-                        }
-                        preload="metadata"
-                        ref={playerRef}
-                        src={resolveMediaUrl(selectedItem.streamUrl, apiBase)}
-                      />
-                    ) : (
-                      <div className="player-frame unavailable wide">
-                        <Clapperboard size={42} />
-                        <p>{selectedItem.container} indexed</p>
-                        <span>Firefox needs a playable container</span>
-                      </div>
-                    )}
+                    <video
+                      className="main-media-player"
+                      controls
+                      key={selectedItem.id}
+                      onEnded={(event) =>
+                        recordPlayback(selectedItem, event.currentTarget, true)
+                      }
+                      onLoadedMetadata={(event) =>
+                        handleLoadedMetadata(selectedItem, event)
+                      }
+                      onPause={(event) =>
+                        recordPlayback(selectedItem, event.currentTarget, true)
+                      }
+                      onTimeUpdate={(event) =>
+                        recordPlayback(selectedItem, event.currentTarget)
+                      }
+                      preload={selectedItem.browserPlayable ? 'metadata' : 'none'}
+                      ref={playerRef}
+                      src={getPlaybackStreamUrl(selectedItem, apiBase)}
+                    />
                   </div>
                 </div>
 
@@ -1262,7 +1468,6 @@ function App() {
                               >
                                 <span>
                                   {formatEpisodeNumber(episode)}
-                                  {episode.browserPlayable ? '' : ' indexed'}
                                 </span>
                                 <strong>
                                   {episode.episodeTitle ?? episode.title}
@@ -1272,7 +1477,7 @@ function App() {
                                     ? episodeRecord.completed
                                       ? 'Watched'
                                       : formatDuration(episodeRecord.position)
-                                    : episode.container}
+                                    : getMediaContainerLabel(episode)}
                                 </p>
                               </button>
                             )
@@ -1507,9 +1712,7 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
   const watchedIndex = sortedEpisodes.findIndex(
     (episode) => episode.id === watchedEpisode.id,
   )
-  const nextEpisode = sortedEpisodes
-    .slice(watchedIndex + 1)
-    .find((episode) => episode.browserPlayable)
+  const nextEpisode = sortedEpisodes[watchedIndex + 1]
 
   return nextEpisode ?? watchedEpisode
 }
@@ -1621,6 +1824,14 @@ function readInitialApiBase() {
   }
 }
 
+function readAutoEncodeEnabled() {
+  try {
+    return window.localStorage.getItem(autoEncodeStorageKey) === '1'
+  } catch {
+    return false
+  }
+}
+
 function getRuntimeApiBase() {
   return (window as MyHomeMediaServerWindow).HOME_MEDIA_CONFIG?.apiBase
 }
@@ -1657,6 +1868,17 @@ function resolveMediaUrl(streamUrl: string, apiBase: string) {
   }
 
   return buildApiUrl(streamUrl, apiBase)
+}
+
+function getPlaybackStreamUrl(item: MediaItem, apiBase: string) {
+  if (item.browserPlayable) {
+    return resolveMediaUrl(item.streamUrl, apiBase)
+  }
+
+  return resolveMediaUrl(
+    `/api/media/${encodeURIComponent(item.id)}/transcode`,
+    apiBase,
+  )
 }
 
 function resolveFileDownloadUrl(entry: FileShareEntry, apiBase: string) {
@@ -1770,10 +1992,14 @@ function getTitleKindLabel(title: LibraryTitle) {
 
 function getPlaybackLabel(title: LibraryTitle, item: MediaItem | null) {
   if (title.kind === 'show' && item) {
-    return formatEpisodeNumber(item)
+    return `${formatEpisodeNumber(item)} · ${getMediaContainerLabel(item)}`
   }
 
-  return item?.container ?? 'Indexed'
+  return item ? getMediaContainerLabel(item) : 'Indexed'
+}
+
+function getMediaContainerLabel(item: MediaItem) {
+  return item.browserPlayable ? item.container : `${item.container} transcode`
 }
 
 function formatEpisodeNumber(item: MediaItem) {
@@ -1788,6 +2014,20 @@ function formatEpisodeNumber(item: MediaItem) {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Unexpected error'
+}
+
+function formatTranscodeCacheState(status: TranscodeCacheStatus) {
+  if (status.state === 'clearing') {
+    return 'Clearing'
+  }
+
+  if (status.state === 'warming') {
+    return status.pendingVideos > 0
+      ? `Encoding ${formatNumber(status.pendingVideos)}`
+      : 'Encoding'
+  }
+
+  return 'Idle'
 }
 
 function formatNumber(value: number) {
