@@ -198,6 +198,12 @@ type MyHomeMediaServerWindow = Window & {
   }
   HOME_MEDIA_SCAN_CACHE_STATS?: ScanPreviewCacheStats
   tizen?: {
+    application?: {
+      getCurrentApplication?: () => {
+        exit?: () => void
+        hide?: () => void
+      }
+    }
     tvinputdevice?: {
       registerKey?: (key: string) => void
       registerKeyBatch?: (keys: string[]) => void
@@ -258,6 +264,7 @@ function TvApp() {
     itemIndex: 0,
     sectionIndex: 0,
   })
+  const [isAppVisible, setIsAppVisible] = useState(() => !document.hidden)
   const [isLoading, setIsLoading] = useState(true)
   const [library, setLibrary] = useState<LibraryResponse | null>(null)
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
@@ -281,6 +288,7 @@ function TvApp() {
     useState<ShortSeekPreview | null>(null)
   const [shortSeekPreviewVisibleVisual, setShortSeekPreviewVisibleVisual] =
     useState<ScanPreviewVisual | null>(null)
+  const [resumeRefreshKey, setResumeRefreshKey] = useState(0)
   const playbackHistoryRef = useRef(playbackHistory)
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
@@ -576,6 +584,10 @@ function TvApp() {
   }, [playbackHistory])
 
   useEffect(() => {
+    if (!isAppVisible) {
+      return
+    }
+
     const controller = new AbortController()
 
     fetchPlaybackHistory(apiBase, controller.signal)
@@ -600,7 +612,7 @@ function TvApp() {
       .catch(() => undefined)
 
     return () => controller.abort()
-  }, [apiBase])
+  }, [apiBase, isAppVisible, resumeRefreshKey])
 
   useEffect(() => {
     const loadedFrameUrls = playerScanLoadedFrameUrlsRef.current
@@ -785,6 +797,10 @@ function TvApp() {
   }, [])
 
   useEffect(() => {
+    if (!isAppVisible) {
+      return
+    }
+
     const controller = new AbortController()
     let didTimeOut = false
     const timeoutId = window.setTimeout(() => {
@@ -818,7 +834,7 @@ function TvApp() {
       window.clearTimeout(timeoutId)
       controller.abort()
     }
-  }, [apiBase])
+  }, [apiBase, isAppVisible, resumeRefreshKey])
 
   const sections = useMemo(
     () => buildTvSections(library?.items ?? [], playbackHistory),
@@ -2088,10 +2104,52 @@ function TvApp() {
   }
 
   useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.hidden) {
+        if (playerItem) {
+          closePlayer()
+        } else {
+          clearScanPreview()
+          clearScanPreviewImages()
+          clearPlayerHudTimeout()
+          hidePlayerBlackout()
+        }
+
+        setIsAppVisible(false)
+        return
+      }
+
+      registerSamsungRemoteKeys()
+      setIsAppVisible(true)
+      setIsLoading(true)
+      setResumeRefreshKey((currentKey) => currentKey + 1)
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  })
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       const action = getRemoteAction(event)
 
       if (!action) {
+        return
+      }
+
+      if (
+        action === 'back' &&
+        !actionMenu &&
+        !playerItem &&
+        !detailTitle
+      ) {
+        if (exitTizenApplication()) {
+          event.preventDefault()
+        }
+
         return
       }
 
@@ -3025,6 +3083,29 @@ function registerSamsungRemoteKeys() {
   } catch {
     // Browsers and some TV runtimes can reject key registration; keydown still works there.
   }
+}
+
+function exitTizenApplication() {
+  const tizenApplication = (window as MyHomeMediaServerWindow).tizen
+    ?.application
+
+  try {
+    const currentApplication = tizenApplication?.getCurrentApplication?.()
+
+    if (currentApplication?.exit) {
+      currentApplication.exit()
+      return true
+    }
+
+    if (currentApplication?.hide) {
+      currentApplication.hide()
+      return true
+    }
+  } catch {
+    return false
+  }
+
+  return false
 }
 
 function hideFailedArtwork(event: SyntheticEvent<HTMLImageElement>) {
