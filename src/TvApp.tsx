@@ -1959,7 +1959,10 @@ function TvApp() {
     direction: ScanDirection,
     isRepeat: boolean,
   ) {
-    if (isRepeat) {
+    const isHeldRepeat =
+      isRepeat || playerScanHeldDirectionRef.current === direction
+
+    if (isHeldRepeat) {
       if (
         playerScanHeldDirectionRef.current === direction &&
         !playerScanPreviewRef.current
