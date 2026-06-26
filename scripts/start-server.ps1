@@ -185,9 +185,22 @@ if ($Background) {
     -RedirectStandardError $stderrLog `
     -PassThru
 
-  Start-Sleep -Seconds 3
+  $deadline = (Get-Date).AddSeconds(20)
+  $portOwners = @()
 
-  $portOwners = @(Get-PortOwner)
+  do {
+    Start-Sleep -Seconds 1
+    $portOwners = @(Get-PortOwner)
+
+    if ($portOwners.Count -gt 0) {
+      break
+    }
+
+    if ($process.HasExited) {
+      throw "Home Media server exited before listening on port $Port with code $($process.ExitCode). Check $stdoutLog and $stderrLog."
+    }
+  } while ((Get-Date) -lt $deadline)
+
   if ($portOwners.Count -eq 0) {
     throw "Home Media server did not start listening on port $Port. Check $stdoutLog and $stderrLog."
   }
