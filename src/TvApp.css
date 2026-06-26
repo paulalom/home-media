@@ -103,6 +103,16 @@ button {
   font-weight: 800;
 }
 
+.tv-status small {
+  color: var(--tv-muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tv-hero {
   background: var(--tv-panel);
   border: 1px solid var(--tv-border);

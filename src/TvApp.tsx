@@ -32,6 +32,8 @@ type RemoteAction =
   | 'right'
   | 'up'
 
+type PlaybackStrategy = 'native' | 'transcode'
+
 type MediaItem = {
   id: string
   title: string
@@ -192,11 +194,48 @@ type ActionMenuEntry = {
   label: string
 }
 
+type ClientVideoProbe = {
+  label: string
+  mimeType: string
+  result: string
+}
+
+type ClientDeviceProfile = {
+  app: string
+  avInfoVersion?: string
+  firmware?: string
+  is8K?: boolean
+  isHdrTvSupport?: boolean
+  isUhd?: boolean
+  model?: string
+  modelCode?: string
+  productInfoVersion?: string
+  realModel?: string
+  tizenVersion?: string
+  userAgent: string
+  videoProbes: ClientVideoProbe[]
+}
+
 type MyHomeMediaServerWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
   }
   HOME_MEDIA_SCAN_CACHE_STATS?: ScanPreviewCacheStats
+  webapis?: {
+    avinfo?: {
+      getVersion?: () => string
+      isHdrTvSupport?: () => boolean
+    }
+    productinfo?: {
+      getFirmware?: () => string
+      getModel?: () => string
+      getModelCode?: () => string
+      getRealModel?: () => string
+      getVersion?: () => string
+      is8KPanelSupported?: () => boolean
+      isUHDAModel?: () => boolean
+    }
+  }
   tizen?: {
     application?: {
       getCurrentApplication?: () => {
@@ -213,9 +252,11 @@ type MyHomeMediaServerWindow = Window & {
 
 const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
+const clientProfileRequestTimeoutMs = 5000
 const libraryRequestTimeoutMs = 15000
 const maxRowItems = 28
 const playerHudHideDelayMs = 1000
+const playerNativeStartupTimeoutMs = 12000
 const playerSeekStepSeconds = 5
 const playerShortSeekPreviewHoldMs = 250
 const playerShortSeekPreviewBackgroundClicks = 5
@@ -239,6 +280,57 @@ const scanPreviewMinimumRetainedSheetsPerDirection = 2
 const scanPreviewSpriteFramesPerSheet = 60
 const scanSpeedMultipliers = [2, 3, 4, 5, 6, 7, 8, 9, 10] as const
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
+const tvNativePlaybackContainers = new Set([
+  'ASF',
+  'AVI',
+  'DIVX',
+  'FLV',
+  'M2TS',
+  'M4V',
+  'MKV',
+  'MOV',
+  'MP4',
+  'MPEG',
+  'MPG',
+  'MTS',
+  'OGV',
+  'TS',
+  'VOB',
+  'WEBM',
+  'WMV',
+])
+const clientVideoProbeMimeTypes: ClientVideoProbe[] = [
+  {
+    label: 'MP4 H.264/AAC',
+    mimeType: 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"',
+    result: '',
+  },
+  {
+    label: 'MP4 HEVC/AAC',
+    mimeType: 'video/mp4; codecs="hvc1.1.6.L93.B0, mp4a.40.2"',
+    result: '',
+  },
+  {
+    label: 'WebM VP9/Opus',
+    mimeType: 'video/webm; codecs="vp9, opus"',
+    result: '',
+  },
+  {
+    label: 'AVI container',
+    mimeType: 'video/x-msvideo',
+    result: '',
+  },
+  {
+    label: 'AVI MPEG-4 ASP/MP3',
+    mimeType: 'video/x-msvideo; codecs="mp4v.20.3, mp3"',
+    result: '',
+  },
+  {
+    label: 'Matroska H.264/AAC',
+    mimeType: 'video/x-matroska; codecs="avc1.42E01E, mp4a.40.2"',
+    result: '',
+  },
+]
 
 async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
   const response = await fetch(buildApiUrl('/api/library', apiBase), {
@@ -258,6 +350,7 @@ function TvApp() {
   const [actionMenuIndex, setActionMenuIndex] = useState(0)
   const [apiBase] = useState(readInitialApiBase)
   const [canLoadArtwork, setCanLoadArtwork] = useState(false)
+  const [clientProfile] = useState(readClientDeviceProfile)
   const [detailState, setDetailState] = useState<DetailState | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [focus, setFocus] = useState<FocusPosition>({
@@ -279,6 +372,10 @@ function TvApp() {
     useState<string | null>(null)
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
+  const [playerStatus, setPlayerStatus] = useState<string | null>(null)
+  const [playbackStrategyById, setPlaybackStrategyById] = useState<
+    Record<string, PlaybackStrategy>
+  >({})
   const [scanPreview, setScanPreview] = useState<ScanPreview | null>(null)
   const [scanPreviewVisibleVisual, setScanPreviewVisibleVisual] =
     useState<ScanPreviewVisual | null>(null)
@@ -300,6 +397,7 @@ function TvApp() {
   const playerScanImageBytesRef = useRef<Map<string, number>>(new Map())
   const playerScanIntervalRef = useRef<number | null>(null)
   const playerScanLastTickRef = useRef<number | null>(null)
+  const playerStartupTimeoutRef = useRef<number | null>(null)
   const playerScanAmbientWarmKeyRef = useRef('')
   const playerScanFrameLoadTokenRef = useRef(0)
   const playerScanLoadedFrameUrlsRef = useRef<Set<string>>(new Set())
@@ -589,6 +687,27 @@ function TvApp() {
     }
 
     const controller = new AbortController()
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      clientProfileRequestTimeoutMs,
+    )
+
+    reportClientProfile(apiBase, clientProfile, controller.signal)
+      .catch(() => undefined)
+      .finally(() => window.clearTimeout(timeoutId))
+
+    return () => {
+      window.clearTimeout(timeoutId)
+      controller.abort()
+    }
+  }, [apiBase, clientProfile, isAppVisible])
+
+  useEffect(() => {
+    if (!isAppVisible) {
+      return
+    }
+
+    const controller = new AbortController()
 
     fetchPlaybackHistory(apiBase, controller.signal)
       .then((serverHistory) => {
@@ -634,6 +753,10 @@ function TvApp() {
         window.clearTimeout(playerShortSeekPreviewTimeoutRef.current)
       }
 
+      if (playerStartupTimeoutRef.current !== null) {
+        window.clearTimeout(playerStartupTimeoutRef.current)
+      }
+
       if (playerScanIntervalRef.current !== null) {
         window.clearInterval(playerScanIntervalRef.current)
       }
@@ -647,6 +770,7 @@ function TvApp() {
       playerScanHoldTimeoutRef.current = null
       playerScanIntervalRef.current = null
       playerScanLastTickRef.current = null
+      playerStartupTimeoutRef.current = null
       playerScanAmbientWarmKeyRef.current = ''
       playerScanFrameLoadTokenRef.current += 1
       playerScanVisualCacheGenerationRef.current += 1
@@ -883,6 +1007,9 @@ function TvApp() {
   const hasPlayerEpisodeSwitchOptions = Boolean(
     playerEpisodeSwitchOptions.previous || playerEpisodeSwitchOptions.next,
   )
+  const playerPlaybackStrategy = playerItem
+    ? getPlaybackStrategy(playerItem, playbackStrategyById)
+    : 'native'
 
   useEffect(() => {
     const selectedCard = selectedCardRef.current
@@ -1355,20 +1482,90 @@ function TvApp() {
     setPlayerEpisodeSwitchTargetId(null)
   }
 
+  function clearPlayerStartupTimeout() {
+    if (playerStartupTimeoutRef.current === null) {
+      return
+    }
+
+    window.clearTimeout(playerStartupTimeoutRef.current)
+    playerStartupTimeoutRef.current = null
+  }
+
+  function armNativePlaybackFallback(item: MediaItem) {
+    const strategy = getPlaybackStrategy(item, playbackStrategyById)
+
+    clearPlayerStartupTimeout()
+
+    if (strategy !== 'native' || item.browserPlayable) {
+      return
+    }
+
+    playerStartupTimeoutRef.current = window.setTimeout(() => {
+      const player = playerRef.current
+
+      if (!playerItem || playerItem.id !== item.id || !player) {
+        return
+      }
+
+      if (hasPlayerStarted(player)) {
+        return
+      }
+
+      fallbackPlayerToTranscode(item, 'Native playback stalled')
+    }, playerNativeStartupTimeoutMs)
+  }
+
+  function fallbackPlayerToTranscode(item: MediaItem, reason: string) {
+    if (getPlaybackStrategy(item, playbackStrategyById) === 'transcode') {
+      return
+    }
+
+    const resumePosition = playerRef.current?.currentTime ?? 0
+
+    clearPlayerStartupTimeout()
+    setPlayerStatus(`${reason}; switching to transcode`)
+    setPlaybackStrategyById((currentStrategies) => ({
+      ...currentStrategies,
+      [item.id]: 'transcode',
+    }))
+
+    window.setTimeout(() => {
+      const player = playerRef.current
+
+      if (!player) {
+        return
+      }
+
+      if (resumePosition > 0 && Number.isFinite(resumePosition)) {
+        player.currentTime = resumePosition
+      }
+
+      void player.play().catch(() => undefined)
+    }, 0)
+  }
+
   function startPlayback(item: MediaItem | null) {
     if (!item) {
       return
     }
 
+    const strategy = getInitialPlaybackStrategy(item)
+
     clearScanPreview()
     clearScanPreviewImages()
     clearPlayerHudTimeout()
+    clearPlayerStartupTimeout()
     setPlayerClock({
       duration: 0,
       position: 0,
     })
     hidePlayerBlackout()
     setPlayerHudVisible(true)
+    setPlayerStatus(getPlaybackStatusLabel(item, strategy))
+    setPlaybackStrategyById((currentStrategies) => ({
+      ...currentStrategies,
+      [item.id]: strategy,
+    }))
     setPlayerItem(item)
   }
 
@@ -1381,7 +1578,9 @@ function TvApp() {
     clearScanPreview()
     clearScanPreviewImages()
     clearPlayerHudTimeout()
+    clearPlayerStartupTimeout()
     hidePlayerBlackout()
+    setPlayerStatus(null)
     setPlayerItem(null)
   }
 
@@ -2220,14 +2419,36 @@ function TvApp() {
         <video
           autoPlay
           className="tv-player"
-          key={playerItem.id}
+          key={`${playerItem.id}:${playerPlaybackStrategy}`}
+          onCanPlay={() => {
+            setPlayerStatus(
+              getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
+            )
+          }}
           onEnded={(event) => {
+            clearPlayerStartupTimeout()
             clearScanPreview()
             clearPlayerHudTimeout()
             hidePlayerBlackout()
             updatePlayerClock(event.currentTarget)
             recordPlayback(playerItem, event.currentTarget, true)
+            setPlayerStatus(null)
             setPlayerItem(null)
+          }}
+          onError={() => {
+            if (playerPlaybackStrategy === 'native') {
+              fallbackPlayerToTranscode(playerItem, 'Native playback failed')
+              return
+            }
+
+            clearPlayerStartupTimeout()
+            setPlayerStatus('Transcode playback failed')
+          }}
+          onLoadStart={() => {
+            setPlayerStatus(
+              getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
+            )
+            armNativePlaybackFallback(playerItem)
           }}
           onLoadedMetadata={(event) => handleLoadedMetadata(playerItem, event)}
           onPause={(event) => {
@@ -2241,8 +2462,12 @@ function TvApp() {
             showPlayerHud(true)
           }}
           onPlaying={(event) => {
+            clearPlayerStartupTimeout()
             hidePlayerBlackout()
             updatePlayerClock(event.currentTarget)
+            setPlayerStatus(
+              getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
+            )
             showPlayerHud(true)
           }}
           onSeeked={(event) => {
@@ -2254,16 +2479,27 @@ function TvApp() {
             showPlayerHud()
           }}
           onTimeUpdate={(event) => {
+            if (event.currentTarget.currentTime > 0) {
+              clearPlayerStartupTimeout()
+            }
+
             updatePlayerClock(event.currentTarget)
             recordPlayback(playerItem, event.currentTarget)
           }}
           onWaiting={(event) => {
             updatePlayerClock(event.currentTarget)
+            if (
+              playerPlaybackStrategy === 'native' &&
+              !hasPlayerStarted(event.currentTarget)
+            ) {
+              setPlayerStatus('Waiting for native playback')
+            }
+
             showPlayerHud()
           }}
           playsInline
           ref={playerRef}
-          src={getPlaybackStreamUrl(playerItem, apiBase)}
+          src={getPlaybackStreamUrl(playerItem, apiBase, playerPlaybackStrategy)}
         />
         {playerBlackoutVisible ? (
           <div className="tv-player-blackout" aria-hidden="true" />
@@ -2446,7 +2682,13 @@ function TvApp() {
                 </div>
                 <div className="tv-player-title">
                   <strong>{getItemDisplayTitle(playerItem)}</strong>
-                  <span>{formatEpisodeNumber(playerItem)}</span>
+                  <span>
+                    {formatPlayerPlaybackLabel(
+                      playerItem,
+                      playerPlaybackStrategy,
+                      playerStatus,
+                    )}
+                  </span>
                 </div>
               </div>
             </>
@@ -2454,7 +2696,13 @@ function TvApp() {
             <>
               <div className="tv-player-title">
                 <strong>{getItemDisplayTitle(playerItem)}</strong>
-                <span>{formatEpisodeNumber(playerItem)}</span>
+                <span>
+                  {formatPlayerPlaybackLabel(
+                    playerItem,
+                    playerPlaybackStrategy,
+                    playerStatus,
+                  )}
+                </span>
               </div>
               <span>{formatPlayerClock(playerClock)}</span>
               <div className="tv-player-progress" aria-hidden="true">
@@ -2639,7 +2887,8 @@ function TvApp() {
         </div>
         <div className="tv-status">
           <span>{library ? `${library.summary.totalVideos} files` : '...'}</span>
-          <strong>{apiBase || 'Local package'}</strong>
+          <strong>{getClientDeviceLabel(clientProfile)}</strong>
+          <small>{apiBase || 'Local package'}</small>
         </div>
       </header>
 
@@ -2881,7 +3130,7 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
     )[0]
 
   if (!watchedEpisode) {
-    return episodes.find((episode) => episode.browserPlayable) ?? episodes[0]
+    return episodes.find(isTvNativePlaybackCandidate) ?? episodes[0]
   }
 
   const watchedRecord = history[watchedEpisode.id]
@@ -3167,8 +3416,142 @@ function resolveMediaUrl(streamUrl: string, apiBase: string) {
   return buildApiUrl(streamUrl, apiBase)
 }
 
-function getPlaybackStreamUrl(item: MediaItem, apiBase: string) {
-  if (item.browserPlayable) {
+async function reportClientProfile(
+  apiBase: string,
+  profile: ClientDeviceProfile,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(buildApiUrl('/api/client-profile', apiBase), {
+    body: JSON.stringify(profile),
+    cache: 'no-store',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    method: 'POST',
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Client profile failed (${response.status})`)
+  }
+}
+
+function readClientDeviceProfile(): ClientDeviceProfile {
+  const appWindow = window as MyHomeMediaServerWindow
+  const productInfo = appWindow.webapis?.productinfo
+  const avInfo = appWindow.webapis?.avinfo
+
+  return {
+    app: 'tv',
+    avInfoVersion: safelyReadString(() => avInfo?.getVersion?.()),
+    firmware: safelyReadString(() => productInfo?.getFirmware?.()),
+    is8K: safelyReadBoolean(() => productInfo?.is8KPanelSupported?.()),
+    isHdrTvSupport: safelyReadBoolean(() => avInfo?.isHdrTvSupport?.()),
+    isUhd: safelyReadBoolean(() => productInfo?.isUHDAModel?.()),
+    model: safelyReadString(() => productInfo?.getModel?.()),
+    modelCode: safelyReadString(() => productInfo?.getModelCode?.()),
+    productInfoVersion: safelyReadString(() => productInfo?.getVersion?.()),
+    realModel: safelyReadString(() => productInfo?.getRealModel?.()),
+    tizenVersion: getTizenVersion(navigator.userAgent),
+    userAgent: navigator.userAgent,
+    videoProbes: readClientVideoProbes(),
+  }
+}
+
+function readClientVideoProbes(): ClientVideoProbe[] {
+  const video = document.createElement('video')
+
+  return clientVideoProbeMimeTypes.map((probe) => ({
+    ...probe,
+    result: video.canPlayType(probe.mimeType),
+  }))
+}
+
+function getClientDeviceLabel(profile: ClientDeviceProfile) {
+  return (
+    profile.realModel ||
+    profile.modelCode ||
+    profile.model ||
+    (profile.tizenVersion ? `Tizen ${profile.tizenVersion}` : 'TV client')
+  )
+}
+
+function getTizenVersion(userAgent: string) {
+  return /Tizen\s+([0-9.]+)/i.exec(userAgent)?.[1]
+}
+
+function safelyReadString(readValue: () => string | undefined) {
+  try {
+    const value = readValue()?.trim()
+
+    return value || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function safelyReadBoolean(readValue: () => boolean | undefined) {
+  try {
+    const value = readValue()
+
+    return typeof value === 'boolean' ? value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function getInitialPlaybackStrategy(item: MediaItem): PlaybackStrategy {
+  return isTvNativePlaybackCandidate(item) ? 'native' : 'transcode'
+}
+
+function getPlaybackStrategy(
+  item: MediaItem,
+  strategies: Record<string, PlaybackStrategy>,
+) {
+  return strategies[item.id] ?? getInitialPlaybackStrategy(item)
+}
+
+function isTvNativePlaybackCandidate(item: MediaItem) {
+  return (
+    item.browserPlayable ||
+    tvNativePlaybackContainers.has(item.container.toUpperCase())
+  )
+}
+
+function getPlaybackStatusLabel(
+  item: MediaItem,
+  strategy: PlaybackStrategy,
+) {
+  if (strategy === 'transcode') {
+    return 'Transcoding'
+  }
+
+  return item.browserPlayable ? 'Direct stream' : 'Native direct play'
+}
+
+function formatPlayerPlaybackLabel(
+  item: MediaItem,
+  strategy: PlaybackStrategy,
+  status: string | null,
+) {
+  const episodeLabel = hasEpisodeCode(item) ? formatEpisodeNumber(item) : ''
+  const strategyLabel = status ?? getPlaybackStatusLabel(item, strategy)
+
+  return [episodeLabel, `${item.container} ${strategyLabel}`]
+    .filter(Boolean)
+    .join(' | ')
+}
+
+function hasPlayerStarted(player: HTMLVideoElement) {
+  return player.currentTime > 0.25
+}
+
+function getPlaybackStreamUrl(
+  item: MediaItem,
+  apiBase: string,
+  strategy = getInitialPlaybackStrategy(item),
+) {
+  if (strategy === 'native' && isTvNativePlaybackCandidate(item)) {
     return resolveMediaUrl(item.streamUrl, apiBase)
   }
 
@@ -4041,9 +4424,7 @@ function getDefaultDetailItemIndex(title: TvTitle, history: PlaybackHistory) {
     return watchedItem.itemIndex
   }
 
-  const firstPlayableIndex = title.items.findIndex(
-    (item) => item.browserPlayable,
-  )
+  const firstPlayableIndex = title.items.findIndex(isTvNativePlaybackCandidate)
 
   return Math.max(firstPlayableIndex, 0)
 }
@@ -4064,11 +4445,15 @@ function getDetailPlaybackLabel(
   item: MediaItem,
   playback: PlaybackRecord | null,
 ) {
-  if (!item.browserPlayable) {
-    return `${item.container} transcode on play`
-  }
-
   if (!playback) {
+    if (!item.browserPlayable && isTvNativePlaybackCandidate(item)) {
+      return `${item.container} native first`
+    }
+
+    if (!isTvNativePlaybackCandidate(item)) {
+      return `${item.container} transcode fallback`
+    }
+
     return item.container
   }
 

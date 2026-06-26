@@ -193,6 +193,29 @@ type TranscodeCacheStatus = {
   updatedAt: string
 }
 
+type ClientVideoProbe = {
+  label: string
+  mimeType: string
+  result: string
+}
+
+type ClientProfile = {
+  app: string
+  avInfoVersion?: string
+  firmware?: string
+  is8K?: boolean
+  isHdrTvSupport?: boolean
+  isUhd?: boolean
+  model?: string
+  modelCode?: string
+  productInfoVersion?: string
+  realModel?: string
+  reportedAt: string
+  tizenVersion?: string
+  userAgent?: string
+  videoProbes: ClientVideoProbe[]
+}
+
 type PreviewFrameQuality = keyof typeof PREVIEW_FRAME_SETTINGS
 
 type PreviewCacheWarmMode = 'background' | 'foreground'
@@ -446,6 +469,7 @@ let transcodeCacheStatus = createInitialTranscodeCacheStatus()
 let transcodeCacheWarmRequest: TranscodeCacheWarmRequest | null = null
 let transcodeCacheWarmRunId = 0
 let transcodeCacheWarmRunning = false
+let latestClientProfile: ClientProfile | null = null
 const previewFrameFetches = new Map<string, Promise<string>>()
 const transcodeCacheEncodes = new Map<string, Promise<string>>()
 
@@ -681,6 +705,7 @@ export async function handleMediaApi(
 ): Promise<boolean> {
   const url = new URL(req.url ?? '/', 'http://my-home-media-server.local')
   const isApiPath =
+    url.pathname === '/api/client-profile' ||
     url.pathname === '/api/files' ||
     url.pathname === '/api/library' ||
     url.pathname === '/api/playback' ||
@@ -696,6 +721,27 @@ export async function handleMediaApi(
     res.writeHead(204, API_CORS_HEADERS)
     res.end()
 
+    return true
+  }
+
+  if (url.pathname === '/api/client-profile') {
+    if (req.method === 'GET') {
+      sendJson(res, { profile: latestClientProfile })
+      return true
+    }
+
+    if (req.method === 'POST') {
+      try {
+        latestClientProfile = normalizeClientProfile(await readJsonBody(req))
+        sendJson(res, latestClientProfile)
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    sendMethodNotAllowed(res, ['GET', 'POST'])
     return true
   }
 
@@ -3069,6 +3115,70 @@ function getFfprobeExecutable() {
   }
 
   return 'ffprobe'
+}
+
+function normalizeClientProfile(value: unknown): ClientProfile {
+  if (!isRecord(value)) {
+    throw createHttpError(400, 'Invalid client profile')
+  }
+
+  const videoProbes = Array.isArray(value.videoProbes)
+    ? value.videoProbes
+        .map(normalizeClientVideoProbe)
+        .filter((probe): probe is ClientVideoProbe => Boolean(probe))
+        .slice(0, 32)
+    : []
+
+  return {
+    app: getClientProfileString(value.app) ?? 'unknown',
+    avInfoVersion: getClientProfileString(value.avInfoVersion),
+    firmware: getClientProfileString(value.firmware),
+    is8K: getClientProfileBoolean(value.is8K),
+    isHdrTvSupport: getClientProfileBoolean(value.isHdrTvSupport),
+    isUhd: getClientProfileBoolean(value.isUhd),
+    model: getClientProfileString(value.model),
+    modelCode: getClientProfileString(value.modelCode),
+    productInfoVersion: getClientProfileString(value.productInfoVersion),
+    realModel: getClientProfileString(value.realModel),
+    reportedAt: new Date().toISOString(),
+    tizenVersion: getClientProfileString(value.tizenVersion),
+    userAgent: getClientProfileString(value.userAgent, 512),
+    videoProbes,
+  }
+}
+
+function normalizeClientVideoProbe(value: unknown): ClientVideoProbe | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const label = getClientProfileString(value.label)
+  const mimeType = getClientProfileString(value.mimeType, 256)
+  const result = getClientProfileString(value.result, 32) ?? ''
+
+  if (!label || !mimeType) {
+    return null
+  }
+
+  return {
+    label,
+    mimeType,
+    result,
+  }
+}
+
+function getClientProfileString(value: unknown, maxLength = 120) {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  const trimmedValue = value.trim()
+
+  return trimmedValue ? trimmedValue.slice(0, maxLength) : undefined
+}
+
+function getClientProfileBoolean(value: unknown) {
+  return typeof value === 'boolean' ? value : undefined
 }
 
 function formatFfmpegTime(seconds: number) {
