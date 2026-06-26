@@ -333,7 +333,7 @@ const scanPreviewMaximumBufferedSheetsPerDirection = 12
 const scanPreviewMinimumBufferedSheetsPerDirection = 1
 const scanPreviewMinimumRetainedSheetsPerDirection = 2
 const scanPreviewSpriteFramesPerSheet = 60
-const scanSpeedMultipliers = [2, 3, 4, 5, 6, 7, 8, 9, 10] as const
+const scanSpeedMultipliers = [2, 4, 6, 8, 10] as const
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
 const tvNativePlaybackContainers = new Set([
   'ASF',
