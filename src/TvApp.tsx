@@ -316,6 +316,7 @@ const playerShortSeekPreviewHoldMs = 250
 const playerShortSeekPreviewBackgroundClicks = 5
 const playerShortSeekPreviewDirectionalClicks = 10
 const scanHoldDelayMs = 320
+const scanPreviewCommitBacktrackSeconds = 1
 const scanPreviewHighFrameBucketSeconds = 1
 const scanPreviewLowFrameBucketSeconds = 5
 const scanPreviewBaseSecondsPerSecond = 5
@@ -2069,7 +2070,7 @@ function TvApp() {
     }
 
     const duration = snapshot.duration
-    const nextPosition = clamp(preview.position, 0, duration || preview.position)
+    const nextPosition = getScanPreviewCommitPosition(preview, duration)
     const shouldResumePlayback = playerScanWasPlayingRef.current && !snapshot.ended
 
     seekActivePlayback(nextPosition)
@@ -4450,6 +4451,20 @@ function getScanPreviewSpriteStyle(
 
 function getScanPreviewFramePosition(position: number, bucketSeconds: number) {
   return Math.max(Math.round(position / bucketSeconds) * bucketSeconds, 0)
+}
+
+function getScanPreviewCommitPosition(preview: ScanPreview, duration: number) {
+  const bucketSeconds = getScanPreviewFrameBucketSeconds(preview)
+  const framePosition = getScanPreviewFramePosition(
+    preview.position,
+    bucketSeconds,
+  )
+  const displayPosition = duration
+    ? Math.min(framePosition, duration)
+    : framePosition
+  const targetPosition = displayPosition - scanPreviewCommitBacktrackSeconds
+
+  return clamp(targetPosition, 0, duration || displayPosition)
 }
 
 function getScanPreviewFrameBucketSeconds(preview: ScanPreview) {
