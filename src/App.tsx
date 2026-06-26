@@ -32,6 +32,13 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import {
+  playbackActivityHeartbeatMs,
+  readPlaybackActivityClientId,
+  reportPlaybackActivity,
+  sendPlaybackActivityBeacon,
+  type PlaybackActivityState,
+} from './playback-activity'
+import {
   fetchPlaybackHistory,
   mergePlaybackHistories,
   readLocalPlaybackHistory,
@@ -369,6 +376,9 @@ function App() {
   const [autoEncodeEnabled, setAutoEncodeEnabled] = useState(
     readAutoEncodeEnabled,
   )
+  const [activePlaybackMediaId, setActivePlaybackMediaId] = useState<
+    string | null
+  >(null)
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
     readLocalPlaybackHistory,
   )
@@ -388,6 +398,9 @@ function App() {
   const [selectedTitleId, setSelectedTitleId] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const playbackHistoryRef = useRef(playbackHistory)
+  const playbackActivityClientIdRef = useRef(readPlaybackActivityClientId())
+  const playbackActivityCleanupStateRef =
+    useRef<PlaybackActivityState>('closed')
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
   const lastAutoEncodeWarmKeyRef = useRef('')
   const playerRef = useRef<HTMLVideoElement | null>(null)
@@ -626,6 +639,57 @@ function App() {
   const selectedPlayback = selectedItem
     ? playbackHistory[selectedItem.id] ?? null
     : null
+
+  useEffect(() => {
+    if (!activePlaybackMediaId) {
+      return
+    }
+
+    const clientId = playbackActivityClientIdRef.current
+
+    function sendOpenHeartbeat() {
+      void reportPlaybackActivity(
+        apiBase,
+        clientId,
+        activePlaybackMediaId,
+        'open',
+      ).catch(() => undefined)
+    }
+
+    function handlePageHide() {
+      sendPlaybackActivityBeacon(
+        apiBase,
+        clientId,
+        activePlaybackMediaId,
+        'closed',
+      )
+    }
+
+    sendOpenHeartbeat()
+
+    const intervalId = window.setInterval(
+      sendOpenHeartbeat,
+      playbackActivityHeartbeatMs,
+    )
+
+    window.addEventListener('pagehide', handlePageHide)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener('pagehide', handlePageHide)
+
+      const cleanupState = playbackActivityCleanupStateRef.current
+
+      playbackActivityCleanupStateRef.current = 'closed'
+      sendPlaybackActivityBeacon(
+        apiBase,
+        clientId,
+        activePlaybackMediaId,
+        cleanupState,
+      )
+    }
+  }, [activePlaybackMediaId, apiBase])
+
   const visibleTitles =
     activeView === 'Files'
       ? []
@@ -699,14 +763,20 @@ function App() {
         (title) => title.id === selectedTitleId,
       )
       const nextSelection = preservedSelection ?? getInitialSelection(nextCollections)
+      const nextResumeItem = nextSelection
+        ? getResumeItem(nextSelection, playbackHistoryRef.current)
+        : null
+
+      if (
+        activePlaybackMediaId &&
+        (!nextResumeItem || nextResumeItem.id !== activePlaybackMediaId)
+      ) {
+        closeActivePlaybackActivity()
+      }
 
       setLibrary(nextLibrary)
       setSelectedTitleId(nextSelection?.id ?? null)
-      setSelectedEpisodeId(
-        nextSelection
-          ? getResumeItem(nextSelection, playbackHistoryRef.current)?.id ?? null
-          : null,
-      )
+      setSelectedEpisodeId(nextResumeItem?.id ?? null)
     } catch (requestError) {
       setError(getErrorMessage(requestError))
     } finally {
@@ -714,11 +784,21 @@ function App() {
     }
   }
 
+  function closeActivePlaybackActivity() {
+    if (!activePlaybackMediaId) {
+      return
+    }
+
+    playbackActivityCleanupStateRef.current = 'closed'
+    setActivePlaybackMediaId(null)
+  }
+
   function selectTitle(
     title: LibraryTitle | null,
     availableCollections = collections,
   ) {
     if (!title) {
+      closeActivePlaybackActivity()
       setSelectedTitleId(null)
       setSelectedEpisodeId(null)
       return
@@ -726,12 +806,27 @@ function App() {
 
     const resolvedTitle =
       availableCollections.all.find((item) => item.id === title.id) ?? title
+    const nextResumeItem = getResumeItem(
+      resolvedTitle,
+      playbackHistoryRef.current,
+    )
+
+    if (
+      activePlaybackMediaId &&
+      (!nextResumeItem || nextResumeItem.id !== activePlaybackMediaId)
+    ) {
+      closeActivePlaybackActivity()
+    }
 
     setSelectedTitleId(resolvedTitle.id)
-    setSelectedEpisodeId(getResumeItem(resolvedTitle, playbackHistoryRef.current)?.id ?? null)
+    setSelectedEpisodeId(nextResumeItem?.id ?? null)
   }
 
   function selectEpisode(episode: MediaItem) {
+    if (activePlaybackMediaId && episode.id !== activePlaybackMediaId) {
+      closeActivePlaybackActivity()
+    }
+
     setSelectedEpisodeId(episode.id)
   }
 
@@ -748,6 +843,8 @@ function App() {
   }
 
   function openFileView() {
+    closeActivePlaybackActivity()
+
     if (activeView === 'Files') {
       refreshFileShare()
       return
@@ -792,16 +889,49 @@ function App() {
     }
   }
 
+  function openPlaybackActivity(item: MediaItem) {
+    playbackActivityCleanupStateRef.current = 'closed'
+    setActivePlaybackMediaId(item.id)
+  }
+
+  function endPlaybackActivity(item: MediaItem) {
+    if (activePlaybackMediaId === item.id) {
+      playbackActivityCleanupStateRef.current = 'ended'
+      setActivePlaybackMediaId(null)
+      return
+    }
+
+    sendPlaybackActivityBeacon(
+      apiBase,
+      playbackActivityClientIdRef.current,
+      item.id,
+      'ended',
+    )
+  }
+
+  function closePlaybackActivity(item: MediaItem) {
+    if (activePlaybackMediaId === item.id) {
+      playbackActivityCleanupStateRef.current = 'closed'
+      setActivePlaybackMediaId(null)
+    }
+  }
+
   function playSelectedItem() {
+    if (selectedItem) {
+      openPlaybackActivity(selectedItem)
+    }
+
     void playerRef.current?.play()
   }
 
   function fullscreenSelectedItem() {
     const player = playerRef.current
 
-    if (!player) {
+    if (!player || !selectedItem) {
       return
     }
+
+    openPlaybackActivity(selectedItem)
 
     void player
       .requestFullscreen()
@@ -1405,15 +1535,19 @@ function App() {
                       className="main-media-player"
                       controls
                       key={selectedItem.id}
-                      onEnded={(event) =>
+                      onEnded={(event) => {
                         recordPlayback(selectedItem, event.currentTarget, true)
-                      }
+                        endPlaybackActivity(selectedItem)
+                      }}
+                      onError={() => closePlaybackActivity(selectedItem)}
                       onLoadedMetadata={(event) =>
                         handleLoadedMetadata(selectedItem, event)
                       }
                       onPause={(event) =>
                         recordPlayback(selectedItem, event.currentTarget, true)
                       }
+                      onPlay={() => openPlaybackActivity(selectedItem)}
+                      onPlaying={() => openPlaybackActivity(selectedItem)}
                       onTimeUpdate={(event) =>
                         recordPlayback(selectedItem, event.currentTarget)
                       }

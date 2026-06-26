@@ -10,6 +10,13 @@ import {
 } from 'react'
 import { Check, ChevronLeft, ChevronRight, Settings } from 'lucide-react'
 import {
+  playbackActivityHeartbeatMs,
+  readPlaybackActivityClientId,
+  reportPlaybackActivity,
+  sendPlaybackActivityBeacon,
+  type PlaybackActivityState,
+} from './playback-activity'
+import {
   deletePlaybackRecord,
   fetchPlaybackHistory,
   mergePlaybackHistories,
@@ -442,6 +449,9 @@ function TvApp() {
     useState<ScanPreviewVisual | null>(null)
   const [resumeRefreshKey, setResumeRefreshKey] = useState(0)
   const playbackHistoryRef = useRef(playbackHistory)
+  const playbackActivityClientIdRef = useRef(readPlaybackActivityClientId())
+  const playbackActivityCleanupStateRef =
+    useRef<PlaybackActivityState>('closed')
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
@@ -1077,6 +1087,58 @@ function TvApp() {
   const playerEngine = playerItem
     ? getPlaybackEngine(playerItem, playerPlaybackStrategy)
     : 'html'
+  const activePlayerItemId = playerItem?.id ?? null
+
+  useEffect(() => {
+    if (!activePlayerItemId) {
+      return
+    }
+
+    const clientId = playbackActivityClientIdRef.current
+
+    function sendOpenHeartbeat() {
+      void reportPlaybackActivity(
+        apiBase,
+        clientId,
+        activePlayerItemId,
+        'open',
+      ).catch(() => undefined)
+    }
+
+    function handlePageHide() {
+      sendPlaybackActivityBeacon(
+        apiBase,
+        clientId,
+        activePlayerItemId,
+        'closed',
+      )
+    }
+
+    playbackActivityCleanupStateRef.current = 'closed'
+    sendOpenHeartbeat()
+
+    const intervalId = window.setInterval(
+      sendOpenHeartbeat,
+      playbackActivityHeartbeatMs,
+    )
+
+    window.addEventListener('pagehide', handlePageHide)
+
+    return () => {
+      window.clearInterval(intervalId)
+      window.removeEventListener('pagehide', handlePageHide)
+
+      const cleanupState = playbackActivityCleanupStateRef.current
+
+      playbackActivityCleanupStateRef.current = 'closed'
+      sendPlaybackActivityBeacon(
+        apiBase,
+        clientId,
+        activePlayerItemId,
+        cleanupState,
+      )
+    }
+  }, [activePlayerItemId, apiBase])
 
   useEffect(() => {
     const selectedCard = selectedCardRef.current
@@ -1671,6 +1733,7 @@ function TvApp() {
           clearPlayerHudTimeout()
           hidePlayerBlackout()
           setPlayerStatus(null)
+          playbackActivityCleanupStateRef.current = 'ended'
           setPlayerItem(null)
         },
       })
@@ -1870,6 +1933,7 @@ function TvApp() {
       ...currentStrategies,
       [item.id]: strategy,
     }))
+    playbackActivityCleanupStateRef.current = 'closed'
     setPlayerItem(item)
   }
 
@@ -1879,6 +1943,7 @@ function TvApp() {
       pauseActivePlayback()
     }
 
+    playbackActivityCleanupStateRef.current = 'closed'
     stopAvPlayPlayback()
     clearScanPreview()
     clearScanPreviewImages()
@@ -2907,6 +2972,7 @@ function TvApp() {
               updatePlayerClock(event.currentTarget)
               recordPlayback(playerItem, event.currentTarget, true)
               setPlayerStatus(null)
+              playbackActivityCleanupStateRef.current = 'ended'
               setPlayerItem(null)
             }}
             onError={() => {

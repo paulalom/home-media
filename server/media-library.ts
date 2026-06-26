@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, promises as fs } from 'node:fs'
 import type { Stats } from 'node:fs'
@@ -216,6 +216,22 @@ type ClientProfile = {
   videoProbes: ClientVideoProbe[]
 }
 
+type PlaybackActivityState = 'closed' | 'ended' | 'open'
+
+type PlaybackActivityReport = {
+  clientId: string
+  mediaId?: string
+  state: PlaybackActivityState
+}
+
+type PlaybackActivityLease = {
+  clientId: string
+  expiresAt: number
+  lastReportedAt: number
+  mediaId: string
+  state: Exclude<PlaybackActivityState, 'closed'>
+}
+
 type PreviewFrameQuality = keyof typeof PREVIEW_FRAME_SETTINGS
 
 type PreviewCacheWarmMode = 'background' | 'foreground'
@@ -392,6 +408,12 @@ const PREVIEW_SPRITE_FRAMES_PER_SHEET =
   PREVIEW_SPRITE_COLUMNS * PREVIEW_SPRITE_ROWS
 const TRANSCODE_CACHE_BACKGROUND_COOLDOWN_MS = 2_000
 const TRANSCODE_TARGET_LABEL = 'MP4 H.264/AAC'
+const PLAYBACK_ACTIVITY_HEARTBEAT_TTL_MS = 90_000
+const PLAYBACK_ACTIVITY_ENDED_GRACE_MS = 5 * 60_000
+const PLAYBACK_ACTIVITY_CLEANUP_INTERVAL_MS = 15_000
+const PLAYBACK_ACTIVITY_POWER_REFRESH_SECONDS = 30
+const PLAYBACK_ACTIVITY_MAX_CLIENT_ID_LENGTH = 128
+const PLAYBACK_ACTIVITY_MAX_MEDIA_ID_LENGTH = 2048
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -470,6 +492,11 @@ let transcodeCacheWarmRequest: TranscodeCacheWarmRequest | null = null
 let transcodeCacheWarmRunId = 0
 let transcodeCacheWarmRunning = false
 let latestClientProfile: ClientProfile | null = null
+const playbackActivityLeases = new Map<string, PlaybackActivityLease>()
+let playbackActivityCleanupTimer: NodeJS.Timeout | null = null
+let systemAwakeProcess: ChildProcess | null = null
+let systemAwakeRestartTimer: NodeJS.Timeout | null = null
+let systemAwakeStartErrorLogged = false
 const previewFrameFetches = new Map<string, Promise<string>>()
 const transcodeCacheEncodes = new Map<string, Promise<string>>()
 
@@ -709,6 +736,7 @@ export async function handleMediaApi(
     url.pathname === '/api/files' ||
     url.pathname === '/api/library' ||
     url.pathname === '/api/playback' ||
+    url.pathname === '/api/playback-activity' ||
     url.pathname === '/api/preview-cache' ||
     url.pathname === '/api/transcode-cache' ||
     /^\/api\/files\/[^/]+\/download$/.test(url.pathname) ||
@@ -870,6 +898,30 @@ export async function handleMediaApi(
       sendError(res, getErrorStatusCode(error), getErrorMessage(error))
     }
 
+    return true
+  }
+
+  if (url.pathname === '/api/playback-activity') {
+    if (req.method === 'GET') {
+      updateSystemAwakeRequest(Date.now())
+      sendJson(res, getPlaybackActivityStatus(Date.now()))
+      return true
+    }
+
+    if (req.method === 'POST') {
+      try {
+        updatePlaybackActivity(
+          normalizePlaybackActivityReport(await readJsonBody(req)),
+        )
+        sendJson(res, getPlaybackActivityStatus(Date.now()))
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    sendMethodNotAllowed(res, ['GET', 'POST'])
     return true
   }
 
@@ -3179,6 +3231,295 @@ function getClientProfileString(value: unknown, maxLength = 120) {
 
 function getClientProfileBoolean(value: unknown) {
   return typeof value === 'boolean' ? value : undefined
+}
+
+function normalizePlaybackActivityReport(
+  value: unknown,
+): PlaybackActivityReport {
+  if (!isRecord(value)) {
+    throw createHttpError(400, 'Invalid playback activity')
+  }
+
+  const clientId = getPlaybackActivityString(
+    value.clientId,
+    PLAYBACK_ACTIVITY_MAX_CLIENT_ID_LENGTH,
+  )
+  const state = getPlaybackActivityState(value.state)
+  const mediaId = getPlaybackActivityString(
+    value.mediaId,
+    PLAYBACK_ACTIVITY_MAX_MEDIA_ID_LENGTH,
+  )
+
+  if (!clientId || !state) {
+    throw createHttpError(400, 'Invalid playback activity')
+  }
+
+  if (state !== 'closed' && !mediaId) {
+    throw createHttpError(400, 'Invalid playback activity media id')
+  }
+
+  return {
+    clientId,
+    mediaId,
+    state,
+  }
+}
+
+function getPlaybackActivityString(value: unknown, maxLength: number) {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  const trimmedValue = value.trim()
+
+  return trimmedValue ? trimmedValue.slice(0, maxLength) : undefined
+}
+
+function getPlaybackActivityState(
+  value: unknown,
+): PlaybackActivityState | undefined {
+  return value === 'closed' || value === 'ended' || value === 'open'
+    ? value
+    : undefined
+}
+
+function updatePlaybackActivity(report: PlaybackActivityReport) {
+  const now = Date.now()
+
+  pruneExpiredPlaybackActivityLeases(now)
+
+  if (report.state === 'closed') {
+    playbackActivityLeases.delete(report.clientId)
+  } else {
+    playbackActivityLeases.set(report.clientId, {
+      clientId: report.clientId,
+      expiresAt:
+        now +
+        (report.state === 'ended'
+          ? PLAYBACK_ACTIVITY_ENDED_GRACE_MS
+          : PLAYBACK_ACTIVITY_HEARTBEAT_TTL_MS),
+      lastReportedAt: now,
+      mediaId: report.mediaId ?? '',
+      state: report.state,
+    })
+  }
+
+  updateSystemAwakeRequest(now)
+}
+
+function pruneExpiredPlaybackActivityLeases(now: number) {
+  let removedLease = false
+
+  for (const [clientId, lease] of playbackActivityLeases.entries()) {
+    if (lease.expiresAt <= now) {
+      playbackActivityLeases.delete(clientId)
+      removedLease = true
+    }
+  }
+
+  return removedLease
+}
+
+function getPlaybackActivityStatus(now: number) {
+  const leases = Array.from(playbackActivityLeases.values()).sort(
+    (first, second) => first.expiresAt - second.expiresAt,
+  )
+  const activeUntil = leases.reduce(
+    (latest, lease) => Math.max(latest, lease.expiresAt),
+    0,
+  )
+
+  return {
+    activeClients: leases.length,
+    activeUntil: activeUntil ? new Date(activeUntil).toISOString() : null,
+    awakeRequired: leases.length > 0,
+    clients: leases.map((lease) => ({
+      clientId: lease.clientId,
+      expiresAt: new Date(lease.expiresAt).toISOString(),
+      lastReportedAt: new Date(lease.lastReportedAt).toISOString(),
+      mediaId: lease.mediaId,
+      secondsRemaining: Math.max(0, Math.ceil((lease.expiresAt - now) / 1000)),
+      state: lease.state,
+    })),
+    endedGraceSeconds: PLAYBACK_ACTIVITY_ENDED_GRACE_MS / 1000,
+    heartbeatSeconds: PLAYBACK_ACTIVITY_HEARTBEAT_TTL_MS / 1000,
+    powerRequest: getSystemAwakeRequestState(),
+  }
+}
+
+function updateSystemAwakeRequest(now = Date.now()) {
+  pruneExpiredPlaybackActivityLeases(now)
+
+  if (playbackActivityLeases.size > 0) {
+    ensurePlaybackActivityCleanupTimer()
+    startSystemAwakeRequest()
+    return
+  }
+
+  clearPlaybackActivityCleanupTimer()
+  stopSystemAwakeRequest()
+}
+
+function ensurePlaybackActivityCleanupTimer() {
+  if (playbackActivityCleanupTimer) {
+    return
+  }
+
+  playbackActivityCleanupTimer = setInterval(() => {
+    updateSystemAwakeRequest()
+  }, PLAYBACK_ACTIVITY_CLEANUP_INTERVAL_MS)
+  playbackActivityCleanupTimer.unref()
+}
+
+function clearPlaybackActivityCleanupTimer() {
+  if (!playbackActivityCleanupTimer) {
+    return
+  }
+
+  clearInterval(playbackActivityCleanupTimer)
+  playbackActivityCleanupTimer = null
+}
+
+function getSystemAwakeRequestState() {
+  if (process.platform !== 'win32') {
+    return 'unsupported'
+  }
+
+  return systemAwakeProcess ? 'active' : 'inactive'
+}
+
+function startSystemAwakeRequest() {
+  if (process.platform !== 'win32' || systemAwakeProcess) {
+    return
+  }
+
+  clearSystemAwakeRestartTimer()
+
+  const command = getSystemAwakePowerShellCommand(process.pid)
+
+  try {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
+      {
+        stdio: 'ignore',
+        windowsHide: true,
+      },
+    )
+
+    systemAwakeProcess = child
+    systemAwakeStartErrorLogged = false
+    child.unref()
+
+    child.once('error', (error) => {
+      if (systemAwakeProcess === child) {
+        systemAwakeProcess = null
+      }
+
+      logSystemAwakeRequestIssue(error)
+      scheduleSystemAwakeRestart()
+    })
+
+    child.once('exit', (code) => {
+      if (systemAwakeProcess === child) {
+        systemAwakeProcess = null
+      }
+
+      if (playbackActivityLeases.size > 0 && !systemAwakeProcess) {
+        if (code && !systemAwakeStartErrorLogged) {
+          logSystemAwakeRequestIssue(
+            new Error(`Windows power request exited with code ${code}`),
+          )
+        }
+
+        scheduleSystemAwakeRestart()
+      }
+    })
+  } catch (error) {
+    logSystemAwakeRequestIssue(error)
+    scheduleSystemAwakeRestart()
+  }
+}
+
+function stopSystemAwakeRequest() {
+  clearSystemAwakeRestartTimer()
+  systemAwakeStartErrorLogged = false
+
+  if (!systemAwakeProcess) {
+    return
+  }
+
+  const child = systemAwakeProcess
+
+  systemAwakeProcess = null
+
+  if (!child.killed) {
+    child.kill()
+  }
+}
+
+function scheduleSystemAwakeRestart() {
+  if (
+    process.platform !== 'win32' ||
+    systemAwakeRestartTimer ||
+    playbackActivityLeases.size === 0
+  ) {
+    return
+  }
+
+  systemAwakeRestartTimer = setTimeout(() => {
+    systemAwakeRestartTimer = null
+
+    if (playbackActivityLeases.size > 0) {
+      startSystemAwakeRequest()
+    }
+  }, 1000)
+  systemAwakeRestartTimer.unref()
+}
+
+function clearSystemAwakeRestartTimer() {
+  if (!systemAwakeRestartTimer) {
+    return
+  }
+
+  clearTimeout(systemAwakeRestartTimer)
+  systemAwakeRestartTimer = null
+}
+
+function logSystemAwakeRequestIssue(error: unknown) {
+  if (systemAwakeStartErrorLogged) {
+    return
+  }
+
+  systemAwakeStartErrorLogged = true
+  console.warn(
+    `Home Media server could not keep the system awake: ${getErrorMessage(
+      error,
+    )}`,
+  )
+}
+
+function getSystemAwakePowerShellCommand(parentProcessId: number) {
+  return `
+$ErrorActionPreference = 'Stop'
+$parentProcessId = ${parentProcessId}
+$refreshSeconds = ${PLAYBACK_ACTIVITY_POWER_REFRESH_SECONDS}
+Add-Type -Namespace HomeMedia -Name NativePower -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+public static extern uint SetThreadExecutionState(uint esFlags);
+'@
+$continuous = [uint32]0x80000000
+$systemRequired = [uint32]0x00000001
+$required = $continuous -bor $systemRequired
+try {
+  while (Get-Process -Id $parentProcessId -ErrorAction SilentlyContinue) {
+    [HomeMedia.NativePower]::SetThreadExecutionState($required) | Out-Null
+    Start-Sleep -Seconds $refreshSeconds
+  }
+} finally {
+  [HomeMedia.NativePower]::SetThreadExecutionState($continuous) | Out-Null
+}
+`
 }
 
 function formatFfmpegTime(seconds: number) {
