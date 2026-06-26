@@ -33,6 +33,7 @@ type RemoteAction =
   | 'up'
 
 type PlaybackStrategy = 'native' | 'transcode'
+type PlayerEngine = 'avplay' | 'html'
 
 type MediaItem = {
   id: string
@@ -216,12 +217,65 @@ type ClientDeviceProfile = {
   videoProbes: ClientVideoProbe[]
 }
 
+type AvPlayPlaybackCallback = {
+  onbufferingcomplete?: () => void
+  onbufferingprogress?: (percent: number) => void
+  onbufferingstart?: () => void
+  oncurrentplaytime?: (currentTime: number) => void
+  onerror?: (eventType: string) => void
+  onerrormsg?: (eventType: string, eventMessage: string) => void
+  onevent?: (eventType: string, eventData: string) => void
+  onstreamcompleted?: () => void
+}
+
+type AvPlayManager = {
+  close: () => void
+  getCurrentTime?: () => number
+  getDuration?: () => number
+  getState?: () => string
+  open: (url: string) => void
+  pause: () => void
+  play: () => void
+  prepareAsync: (
+    successCallback?: () => void,
+    errorCallback?: (error?: unknown) => void,
+  ) => void
+  seekTo?: (
+    milliseconds: number,
+    successCallback?: () => void,
+    errorCallback?: (error?: unknown) => void,
+  ) => void
+  setBufferingParam?: (option: string, unit: string, amount: number) => void
+  setDisplayMethod?: (displayMethod: string) => void
+  setDisplayRect: (
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+  ) => void
+  setListener: (playbackCallback: AvPlayPlaybackCallback) => void
+  setTimeoutForBuffering?: (seconds: number) => void
+  stop: () => void
+}
+
+type ActivePlaybackSnapshot = {
+  duration: number
+  ended: boolean
+  paused: boolean
+  position: number
+}
+
+type AvPlayPlaybackSnapshot = ActivePlaybackSnapshot & {
+  itemId: string | null
+}
+
 type MyHomeMediaServerWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
   }
   HOME_MEDIA_SCAN_CACHE_STATS?: ScanPreviewCacheStats
   webapis?: {
+    avplay?: AvPlayManager
     avinfo?: {
       getVersion?: () => string
       isHdrTvSupport?: () => boolean
@@ -390,6 +444,15 @@ function TvApp() {
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
+  const pendingHtmlResumePositionRef = useRef(0)
+  const avPlayPlaybackRef = useRef<AvPlayPlaybackSnapshot>({
+    duration: 0,
+    ended: false,
+    itemId: null,
+    paused: true,
+    position: 0,
+  })
+  const avPlayProgressIntervalRef = useRef<number | null>(null)
   const playerHudTimeoutRef = useRef<number | null>(null)
   const playerScanCommitCleanupRef = useRef<(() => void) | null>(null)
   const playerScanHeldDirectionRef = useRef<ScanDirection | null>(null)
@@ -1010,6 +1073,9 @@ function TvApp() {
   const playerPlaybackStrategy = playerItem
     ? getPlaybackStrategy(playerItem, playbackStrategyById)
     : 'native'
+  const playerEngine = playerItem
+    ? getPlaybackEngine(playerItem, playerPlaybackStrategy)
+    : 'html'
 
   useEffect(() => {
     const selectedCard = selectedCardRef.current
@@ -1482,6 +1548,237 @@ function TvApp() {
     setPlayerEpisodeSwitchTargetId(null)
   }
 
+  function getAvPlay() {
+    return (window as MyHomeMediaServerWindow).webapis?.avplay ?? null
+  }
+
+  function clearAvPlayProgressInterval() {
+    if (avPlayProgressIntervalRef.current === null) {
+      return
+    }
+
+    window.clearInterval(avPlayProgressIntervalRef.current)
+    avPlayProgressIntervalRef.current = null
+  }
+
+  function startAvPlayProgressInterval(item: MediaItem) {
+    if (avPlayProgressIntervalRef.current !== null) {
+      return
+    }
+
+    avPlayProgressIntervalRef.current = window.setInterval(() => {
+      updateAvPlayClockFromApi(item)
+    }, 1000)
+  }
+
+  function stopAvPlayPlayback() {
+    const avPlay = getAvPlay()
+
+    clearAvPlayProgressInterval()
+
+    if (avPlayPlaybackRef.current.itemId) {
+      avPlayPlaybackRef.current = {
+        duration: 0,
+        ended: false,
+        itemId: null,
+        paused: true,
+        position: 0,
+      }
+    }
+
+    if (!avPlay) {
+      return
+    }
+
+    try {
+      avPlay.stop()
+    } catch {
+      // The player may already be stopped or not initialized.
+    }
+
+    try {
+      avPlay.close()
+    } catch {
+      // Close can throw if AVPlay never reached IDLE.
+    }
+  }
+
+  function startAvPlayPlayback(item: MediaItem) {
+    const avPlay = getAvPlay()
+
+    if (!avPlay) {
+      fallbackPlayerToTranscode(item, 'AVPlay unavailable')
+      return
+    }
+
+    stopAvPlayPlayback()
+    clearPlayerStartupTimeout()
+
+    avPlayPlaybackRef.current = {
+      duration: 0,
+      ended: false,
+      itemId: item.id,
+      paused: true,
+      position: 0,
+    }
+
+    const playbackUrl = getPlaybackStreamUrl(item, apiBase, 'native')
+
+    setPlayerStatus('AVPlay native direct play')
+
+    const failAvPlay = (reason: string) => {
+      if (avPlayPlaybackRef.current.itemId !== item.id) {
+        return
+      }
+
+      fallbackPlayerToTranscode(item, reason)
+    }
+
+    try {
+      avPlay.open(playbackUrl)
+      avPlay.setListener({
+        onbufferingcomplete: () => {
+          if (avPlayPlaybackRef.current.itemId === item.id) {
+            setPlayerStatus('AVPlay native direct play')
+          }
+        },
+        onbufferingprogress: (percent) => {
+          if (avPlayPlaybackRef.current.itemId === item.id && percent < 100) {
+            setPlayerStatus(`AVPlay buffering ${Math.round(percent)}%`)
+          }
+        },
+        onbufferingstart: () => {
+          if (avPlayPlaybackRef.current.itemId === item.id) {
+            setPlayerStatus('AVPlay buffering')
+          }
+        },
+        oncurrentplaytime: (currentTimeMs) => {
+          updateAvPlayClock(item, currentTimeMs / 1000)
+        },
+        onerror: () => failAvPlay('AVPlay failed'),
+        onerrormsg: (_eventType, eventMessage) => {
+          failAvPlay(eventMessage || 'AVPlay failed')
+        },
+        onstreamcompleted: () => {
+          const snapshot = readActivePlaybackSnapshot()
+          const duration = snapshot?.duration || avPlayPlaybackRef.current.duration
+
+          clearPlayerStartupTimeout()
+          recordPlaybackFromValues(item, duration, duration, true)
+          stopAvPlayPlayback()
+          clearScanPreview()
+          clearPlayerHudTimeout()
+          hidePlayerBlackout()
+          setPlayerStatus(null)
+          setPlayerItem(null)
+        },
+      })
+      setAvPlayDisplayRect(avPlay)
+      avPlay.setDisplayMethod?.('PLAYER_DISPLAY_MODE_AUTO_ASPECT_RATIO')
+      avPlay.setTimeoutForBuffering?.(10)
+      avPlay.setBufferingParam?.(
+        'PLAYER_BUFFER_FOR_PLAY',
+        'PLAYER_BUFFER_SIZE_IN_SECOND',
+        4,
+      )
+      armNativePlaybackFallback(item)
+      avPlay.prepareAsync(
+        () => finishAvPlayPrepare(item, avPlay),
+        () => failAvPlay('AVPlay prepare failed'),
+      )
+    } catch (error) {
+      failAvPlay(getErrorMessage(error))
+    }
+  }
+
+  function finishAvPlayPrepare(item: MediaItem, avPlay: AvPlayManager) {
+    if (avPlayPlaybackRef.current.itemId !== item.id) {
+      return
+    }
+
+    const duration = getAvPlayDuration(avPlay)
+    const resumePosition = getResumePosition(
+      playbackHistoryRef.current[item.id] ?? null,
+      duration,
+    )
+
+    avPlayPlaybackRef.current = {
+      ...avPlayPlaybackRef.current,
+      duration,
+      position: resumePosition,
+    }
+    updatePlayerClockFromValues(duration, resumePosition)
+
+    const playPrepared = () => {
+      if (avPlayPlaybackRef.current.itemId !== item.id) {
+        return
+      }
+
+      try {
+        avPlay.play()
+        avPlayPlaybackRef.current = {
+          ...avPlayPlaybackRef.current,
+          ended: false,
+          paused: false,
+        }
+        setPlayerStatus('AVPlay native direct play')
+        startAvPlayProgressInterval(item)
+        showPlayerHud(true)
+      } catch (error) {
+        fallbackPlayerToTranscode(item, getErrorMessage(error))
+      }
+    }
+
+    if (resumePosition > 0 && avPlay.seekTo) {
+      try {
+        avPlay.seekTo(Math.round(resumePosition * 1000), playPrepared, playPrepared)
+      } catch {
+        playPrepared()
+      }
+      return
+    }
+
+    playPrepared()
+  }
+
+  function updateAvPlayClockFromApi(item: MediaItem) {
+    const avPlay = getAvPlay()
+
+    if (!avPlay || avPlayPlaybackRef.current.itemId !== item.id) {
+      return
+    }
+
+    updateAvPlayClock(item, getAvPlayCurrentTime(avPlay))
+  }
+
+  function updateAvPlayClock(item: MediaItem, position: number) {
+    if (avPlayPlaybackRef.current.itemId !== item.id) {
+      return
+    }
+
+    const duration = avPlayPlaybackRef.current.duration || getAvPlayDuration()
+    const clampedPosition = clamp(position, 0, duration || position)
+
+    if (clampedPosition > 0.25) {
+      clearPlayerStartupTimeout()
+    }
+
+    avPlayPlaybackRef.current = {
+      ...avPlayPlaybackRef.current,
+      duration,
+      position: clampedPosition,
+    }
+    updatePlayerClockFromValues(duration, clampedPosition)
+    recordPlaybackFromValues(item, duration, clampedPosition)
+  }
+
+  function setAvPlayDisplayRect(avPlay: AvPlayManager) {
+    const width = Math.round(window.innerWidth || 1920)
+    const height = Math.round(window.innerHeight || 1080)
+
+    avPlay.setDisplayRect(0, 0, width, height)
+  }
+
   function clearPlayerStartupTimeout() {
     if (playerStartupTimeoutRef.current === null) {
       return
@@ -1489,6 +1786,16 @@ function TvApp() {
 
     window.clearTimeout(playerStartupTimeoutRef.current)
     playerStartupTimeoutRef.current = null
+  }
+
+  function hasNativePlaybackStarted(item: MediaItem) {
+    if (getPlaybackEngine(item, 'native') === 'avplay') {
+      return avPlayPlaybackRef.current.itemId === item.id
+        ? avPlayPlaybackRef.current.position > 0.25
+        : false
+    }
+
+    return playerRef.current ? hasPlayerStarted(playerRef.current) : false
   }
 
   function armNativePlaybackFallback(item: MediaItem) {
@@ -1501,13 +1808,11 @@ function TvApp() {
     }
 
     playerStartupTimeoutRef.current = window.setTimeout(() => {
-      const player = playerRef.current
-
-      if (!playerItem || playerItem.id !== item.id || !player) {
+      if (!playerItem || playerItem.id !== item.id) {
         return
       }
 
-      if (hasPlayerStarted(player)) {
+      if (hasNativePlaybackStarted(item)) {
         return
       }
 
@@ -1520,9 +1825,11 @@ function TvApp() {
       return
     }
 
-    const resumePosition = playerRef.current?.currentTime ?? 0
+    const resumePosition = readActivePlaybackSnapshot()?.position ?? 0
 
     clearPlayerStartupTimeout()
+    stopAvPlayPlayback()
+    pendingHtmlResumePositionRef.current = resumePosition
     setPlayerStatus(`${reason}; switching to transcode`)
     setPlaybackStrategyById((currentStrategies) => ({
       ...currentStrategies,
@@ -1534,10 +1841,6 @@ function TvApp() {
 
       if (!player) {
         return
-      }
-
-      if (resumePosition > 0 && Number.isFinite(resumePosition)) {
-        player.currentTime = resumePosition
       }
 
       void player.play().catch(() => undefined)
@@ -1570,11 +1873,12 @@ function TvApp() {
   }
 
   function closePlayer() {
-    if (playerItem && playerRef.current) {
-      recordPlayback(playerItem, playerRef.current, true)
-      playerRef.current.pause()
+    if (playerItem) {
+      recordActivePlayback(playerItem, true)
+      pauseActivePlayback()
     }
 
+    stopAvPlayPlayback()
     clearScanPreview()
     clearScanPreviewImages()
     clearPlayerHudTimeout()
@@ -1585,42 +1889,38 @@ function TvApp() {
   }
 
   function playPlayer() {
-    const player = playerRef.current
-
-    if (player) {
-      showPlayerHud()
-      void player.play()
-    }
+    showPlayerHud()
+    playActivePlayback()
   }
 
   function pausePlayer() {
     showPlayerHud()
-    playerRef.current?.pause()
+    pauseActivePlayback()
   }
 
   function revealPlayerHud() {
-    const player = playerRef.current
+    const snapshot = readActivePlaybackSnapshot()
 
-    if (player) {
-      updatePlayerClock(player)
+    if (snapshot) {
+      updatePlayerClockFromValues(snapshot.duration, snapshot.position)
     }
 
     showPlayerHud()
   }
 
   function togglePlayer() {
-    const player = playerRef.current
+    const snapshot = readActivePlaybackSnapshot()
 
-    if (!player) {
+    if (!snapshot) {
       return
     }
 
-    if (player.paused) {
+    if (snapshot.paused) {
       showPlayerHud()
-      void player.play()
+      playActivePlayback()
     } else {
       showPlayerHud()
-      player.pause()
+      pauseActivePlayback()
     }
   }
 
@@ -1645,9 +1945,9 @@ function TvApp() {
       return false
     }
 
-    if (playerItem && playerRef.current) {
-      recordPlayback(playerItem, playerRef.current, true)
-      playerRef.current.pause()
+    if (playerItem) {
+      recordActivePlayback(playerItem, true)
+      pauseActivePlayback()
     }
 
     startPlayback(target)
@@ -1707,13 +2007,13 @@ function TvApp() {
     direction: ScanDirection,
     advanceStage: boolean,
   ) {
-    const player = playerRef.current
+    const snapshot = readActivePlaybackSnapshot()
 
-    if (!player) {
+    if (!snapshot) {
       return
     }
 
-    const duration = getFiniteVideoDuration(player)
+    const duration = snapshot.duration
 
     if (!duration) {
       skipPlayer(direction * playerSeekStepSeconds)
@@ -1726,8 +2026,8 @@ function TvApp() {
     const currentPreview = playerScanPreviewRef.current
 
     if (!currentPreview) {
-      playerScanWasPlayingRef.current = !player.paused && !player.ended
-      player.pause()
+      playerScanWasPlayingRef.current = !snapshot.paused && !snapshot.ended
+      pauseActivePlayback()
     }
 
     const clampedPreview = currentPreview
@@ -1741,7 +2041,7 @@ function TvApp() {
         ? getSteppedScanPreview(clampedPreview, direction)
         : {
             direction,
-            position: clampedPreview?.position ?? player.currentTime,
+            position: clampedPreview?.position ?? snapshot.position,
             scanning: true,
             speedIndex: clampedPreview?.speedIndex ?? 0,
           }
@@ -1761,18 +2061,18 @@ function TvApp() {
   }
 
   function commitScanPreview() {
-    const player = playerRef.current
+    const snapshot = readActivePlaybackSnapshot()
     const preview = playerScanPreviewRef.current
 
-    if (!player || !preview) {
+    if (!snapshot || !preview) {
       return false
     }
 
-    const duration = getFiniteVideoDuration(player)
+    const duration = snapshot.duration
     const nextPosition = clamp(preview.position, 0, duration || preview.position)
-    const shouldResumePlayback = playerScanWasPlayingRef.current && !player.ended
+    const shouldResumePlayback = playerScanWasPlayingRef.current && !snapshot.ended
 
-    player.currentTime = nextPosition
+    seekActivePlayback(nextPosition)
     updatePlayerClockFromValues(duration, nextPosition)
 
     if (!shouldResumePlayback) {
@@ -1782,14 +2082,14 @@ function TvApp() {
         position: nextPosition,
         scanning: false,
       })
-      finishScanPreviewCommitAfterSeek(player)
+      finishScanPreviewCommitAfterSeek()
       showPlayerHud()
       return true
     }
 
     clearScanPreview()
 
-    void player.play()
+    playActivePlayback()
     showPlayerHud(true)
 
     return true
@@ -2001,13 +2301,13 @@ function TvApp() {
   }
 
   function primePendingScanPreview(direction: ScanDirection) {
-    const player = playerRef.current
+    const snapshot = readActivePlaybackSnapshot()
 
-    if (!player || !playerItem) {
+    if (!snapshot || !playerItem) {
       return
     }
 
-    const duration = getFiniteVideoDuration(player)
+    const duration = snapshot.duration
 
     if (!duration) {
       return
@@ -2018,7 +2318,7 @@ function TvApp() {
       direction,
       position: currentPreview
         ? clamp(currentPreview.position, 0, duration)
-        : player.currentTime,
+        : snapshot.position,
       scanning: true,
       speedIndex: currentPreview?.speedIndex ?? 0,
     }
@@ -2080,7 +2380,7 @@ function TvApp() {
     playerScanCommitCleanupRef.current = null
   }
 
-  function finishScanPreviewCommitAfterSeek(player: HTMLVideoElement) {
+  function finishScanPreviewCommitAfterSeek() {
     clearScanCommitWait()
 
     let isDone = false
@@ -2095,11 +2395,12 @@ function TvApp() {
       showPlayerHud()
     }
     const timeoutId = window.setTimeout(finishCommit, 1200)
+    const player = playerRef.current
 
-    player.addEventListener('seeked', finishCommit)
+    player?.addEventListener('seeked', finishCommit)
     playerScanCommitCleanupRef.current = () => {
       window.clearTimeout(timeoutId)
-      player.removeEventListener('seeked', finishCommit)
+      player?.removeEventListener('seeked', finishCommit)
     }
   }
 
@@ -2125,14 +2426,14 @@ function TvApp() {
   }
 
   function updateScanPreviewPosition() {
-    const player = playerRef.current
+    const snapshot = readActivePlaybackSnapshot()
     const preview = playerScanPreviewRef.current
 
-    if (!player || !preview?.scanning) {
+    if (!snapshot || !preview?.scanning) {
       return
     }
 
-    const duration = getFiniteVideoDuration(player)
+    const duration = snapshot.duration
 
     if (!duration) {
       stopScanPreviewTicker()
@@ -2173,30 +2474,164 @@ function TvApp() {
   }
 
   function skipPlayer(seconds: number) {
-    const player = playerRef.current
+    const snapshot = readActivePlaybackSnapshot()
 
-    if (!player) {
+    if (!snapshot) {
       return
     }
 
-    const duration = getFiniteVideoDuration(player)
-    const currentPosition = Number.isFinite(player.currentTime)
-      ? player.currentTime
-      : 0
+    const duration = snapshot.duration
+    const currentPosition = snapshot.position
     const nextPosition = clamp(
       currentPosition + seconds,
       0,
       duration || currentPosition,
     )
 
-    player.currentTime = nextPosition
+    seekActivePlayback(nextPosition)
     updatePlayerClockFromValues(
       duration,
       nextPosition,
       seconds >= 0 ? 1 : -1,
     )
     showShortSeekPreview(nextPosition, duration)
-    showPlayerHud(!player.paused && !player.ended)
+    showPlayerHud(!snapshot.paused && !snapshot.ended)
+  }
+
+  function readActivePlaybackSnapshot(): ActivePlaybackSnapshot | null {
+    if (playerEngine === 'avplay' && avPlayPlaybackRef.current.itemId) {
+      return avPlayPlaybackRef.current
+    }
+
+    const player = playerRef.current
+
+    if (!player) {
+      return null
+    }
+
+    return {
+      duration: getFiniteVideoDuration(player),
+      ended: player.ended,
+      paused: player.paused,
+      position: Number.isFinite(player.currentTime) ? player.currentTime : 0,
+    }
+  }
+
+  function playActivePlayback() {
+    if (playerEngine === 'avplay') {
+      const avPlay = getAvPlay()
+
+      if (!avPlay || !playerItem) {
+        return
+      }
+
+      try {
+        avPlay.play()
+        avPlayPlaybackRef.current = {
+          ...avPlayPlaybackRef.current,
+          ended: false,
+          paused: false,
+        }
+        startAvPlayProgressInterval(playerItem)
+      } catch (error) {
+        fallbackPlayerToTranscode(playerItem, getErrorMessage(error))
+      }
+      return
+    }
+
+    void playerRef.current?.play()
+  }
+
+  function pauseActivePlayback() {
+    if (playerEngine === 'avplay') {
+      const avPlay = getAvPlay()
+
+      if (!avPlay) {
+        return
+      }
+
+      try {
+        avPlay.pause()
+        avPlayPlaybackRef.current = {
+          ...avPlayPlaybackRef.current,
+          paused: true,
+        }
+      } catch {
+        // Pause can fail if AVPlay is still preparing.
+      }
+      return
+    }
+
+    playerRef.current?.pause()
+  }
+
+  function seekActivePlayback(position: number) {
+    if (playerEngine === 'avplay') {
+      const avPlay = getAvPlay()
+      const item = playerItem
+
+      if (!avPlay || !item) {
+        return
+      }
+
+      const duration = avPlayPlaybackRef.current.duration
+      const clampedPosition = clamp(position, 0, duration || position)
+
+      avPlayPlaybackRef.current = {
+        ...avPlayPlaybackRef.current,
+        position: clampedPosition,
+      }
+
+      try {
+        avPlay.seekTo?.(Math.round(clampedPosition * 1000))
+      } catch (error) {
+        fallbackPlayerToTranscode(item, getErrorMessage(error))
+      }
+      return
+    }
+
+    const player = playerRef.current
+
+    if (!player) {
+      return
+    }
+
+    player.currentTime = position
+  }
+
+  function recordActivePlayback(item: MediaItem, force = false) {
+    const snapshot = readActivePlaybackSnapshot()
+
+    if (!snapshot) {
+      return
+    }
+
+    recordPlaybackFromValues(
+      item,
+      snapshot.duration,
+      snapshot.position,
+      force,
+    )
+  }
+
+  function getAvPlayDuration(avPlay = getAvPlay()) {
+    try {
+      const durationMs = avPlay?.getDuration?.() ?? 0
+
+      return Number.isFinite(durationMs) ? durationMs / 1000 : 0
+    } catch {
+      return 0
+    }
+  }
+
+  function getAvPlayCurrentTime(avPlay = getAvPlay()) {
+    try {
+      const currentTimeMs = avPlay?.getCurrentTime?.() ?? 0
+
+      return Number.isFinite(currentTimeMs) ? currentTimeMs / 1000 : 0
+    } catch {
+      return avPlayPlaybackRef.current.position
+    }
   }
 
   function handleLoadedMetadata(
@@ -2204,13 +2639,20 @@ function TvApp() {
     event: SyntheticEvent<HTMLVideoElement>,
   ) {
     const video = event.currentTarget
+    const pendingResumePosition = pendingHtmlResumePositionRef.current
     const resumePosition = getResumePosition(
       playbackHistoryRef.current[item.id] ?? null,
       video.duration,
     )
+    const targetResumePosition =
+      pendingResumePosition > 0
+        ? clamp(pendingResumePosition, 0, getFiniteVideoDuration(video))
+        : resumePosition
 
-    if (resumePosition > 0) {
-      video.currentTime = resumePosition
+    pendingHtmlResumePositionRef.current = 0
+
+    if (targetResumePosition > 0) {
+      video.currentTime = targetResumePosition
     }
 
     updatePlayerClock(video)
@@ -2277,6 +2719,15 @@ function TvApp() {
     const duration = Number.isFinite(video.duration) ? video.duration : 0
     const position = Number.isFinite(video.currentTime) ? video.currentTime : 0
 
+    recordPlaybackFromValues(item, duration, position, force)
+  }
+
+  function recordPlaybackFromValues(
+    item: MediaItem,
+    duration: number,
+    position: number,
+    force = false,
+  ) {
     if (!duration || position < 1) {
       return
     }
@@ -2301,6 +2752,24 @@ function TvApp() {
     }))
     void savePlaybackRecord(apiBase, item.id, record).catch(() => undefined)
   }
+
+  useEffect(() => {
+    if (!playerItem || playerEngine !== 'avplay') {
+      stopAvPlayPlayback()
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      startAvPlayPlayback(playerItem)
+    }, 0)
+
+    return () => {
+      window.clearTimeout(timeoutId)
+      stopAvPlayPlayback()
+    }
+    // AVPlay owns an external native player; restart only when the selected item or engine changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiBase, playerEngine, playerItem, playerPlaybackStrategy])
 
   useEffect(() => {
     function handleVisibilityChange() {
@@ -2416,91 +2885,103 @@ function TvApp() {
 
     return (
       <main className="tv-player-shell">
-        <video
-          autoPlay
-          className="tv-player"
-          key={`${playerItem.id}:${playerPlaybackStrategy}`}
-          onCanPlay={() => {
-            setPlayerStatus(
-              getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
-            )
-          }}
-          onEnded={(event) => {
-            clearPlayerStartupTimeout()
-            clearScanPreview()
-            clearPlayerHudTimeout()
-            hidePlayerBlackout()
-            updatePlayerClock(event.currentTarget)
-            recordPlayback(playerItem, event.currentTarget, true)
-            setPlayerStatus(null)
-            setPlayerItem(null)
-          }}
-          onError={() => {
-            if (playerPlaybackStrategy === 'native') {
-              fallbackPlayerToTranscode(playerItem, 'Native playback failed')
-              return
-            }
-
-            clearPlayerStartupTimeout()
-            setPlayerStatus('Transcode playback failed')
-          }}
-          onLoadStart={() => {
-            setPlayerStatus(
-              getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
-            )
-            armNativePlaybackFallback(playerItem)
-          }}
-          onLoadedMetadata={(event) => handleLoadedMetadata(playerItem, event)}
-          onPause={(event) => {
-            updatePlayerClock(event.currentTarget)
-            showPlayerHud()
-            recordPlayback(playerItem, event.currentTarget, true)
-          }}
-          onPlay={(event) => {
-            hidePlayerBlackout()
-            updatePlayerClock(event.currentTarget)
-            showPlayerHud(true)
-          }}
-          onPlaying={(event) => {
-            clearPlayerStartupTimeout()
-            hidePlayerBlackout()
-            updatePlayerClock(event.currentTarget)
-            setPlayerStatus(
-              getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
-            )
-            showPlayerHud(true)
-          }}
-          onSeeked={(event) => {
-            updatePlayerClock(event.currentTarget)
-            showPlayerHud(!event.currentTarget.paused)
-          }}
-          onSeeking={(event) => {
-            updatePlayerClock(event.currentTarget)
-            showPlayerHud()
-          }}
-          onTimeUpdate={(event) => {
-            if (event.currentTarget.currentTime > 0) {
+        {playerEngine === 'html' ? (
+          <video
+            autoPlay
+            className="tv-player"
+            key={`${playerItem.id}:${playerPlaybackStrategy}`}
+            onCanPlay={() => {
+              setPlayerStatus(
+                getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
+              )
+            }}
+            onEnded={(event) => {
               clearPlayerStartupTimeout()
-            }
+              clearScanPreview()
+              clearPlayerHudTimeout()
+              hidePlayerBlackout()
+              updatePlayerClock(event.currentTarget)
+              recordPlayback(playerItem, event.currentTarget, true)
+              setPlayerStatus(null)
+              setPlayerItem(null)
+            }}
+            onError={() => {
+              if (playerPlaybackStrategy === 'native') {
+                fallbackPlayerToTranscode(playerItem, 'Native playback failed')
+                return
+              }
 
-            updatePlayerClock(event.currentTarget)
-            recordPlayback(playerItem, event.currentTarget)
-          }}
-          onWaiting={(event) => {
-            updatePlayerClock(event.currentTarget)
-            if (
-              playerPlaybackStrategy === 'native' &&
-              !hasPlayerStarted(event.currentTarget)
-            ) {
-              setPlayerStatus('Waiting for native playback')
-            }
+              clearPlayerStartupTimeout()
+              setPlayerStatus('Transcode playback failed')
+            }}
+            onLoadStart={() => {
+              setPlayerStatus(
+                getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
+              )
+              armNativePlaybackFallback(playerItem)
+            }}
+            onLoadedMetadata={(event) => handleLoadedMetadata(playerItem, event)}
+            onPause={(event) => {
+              updatePlayerClock(event.currentTarget)
+              showPlayerHud()
+              recordPlayback(playerItem, event.currentTarget, true)
+            }}
+            onPlay={(event) => {
+              hidePlayerBlackout()
+              updatePlayerClock(event.currentTarget)
+              showPlayerHud(true)
+            }}
+            onPlaying={(event) => {
+              clearPlayerStartupTimeout()
+              hidePlayerBlackout()
+              updatePlayerClock(event.currentTarget)
+              setPlayerStatus(
+                getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
+              )
+              showPlayerHud(true)
+            }}
+            onSeeked={(event) => {
+              updatePlayerClock(event.currentTarget)
+              showPlayerHud(!event.currentTarget.paused)
+            }}
+            onSeeking={(event) => {
+              updatePlayerClock(event.currentTarget)
+              showPlayerHud()
+            }}
+            onTimeUpdate={(event) => {
+              if (event.currentTarget.currentTime > 0) {
+                clearPlayerStartupTimeout()
+              }
 
-            showPlayerHud()
-          }}
-          playsInline
-          ref={playerRef}
-          src={getPlaybackStreamUrl(playerItem, apiBase, playerPlaybackStrategy)}
-        />
+              updatePlayerClock(event.currentTarget)
+              recordPlayback(playerItem, event.currentTarget)
+            }}
+            onWaiting={(event) => {
+              updatePlayerClock(event.currentTarget)
+              if (
+                playerPlaybackStrategy === 'native' &&
+                !hasPlayerStarted(event.currentTarget)
+              ) {
+                setPlayerStatus('Waiting for native playback')
+              }
+
+              showPlayerHud()
+            }}
+            playsInline
+            ref={playerRef}
+            src={getPlaybackStreamUrl(
+              playerItem,
+              apiBase,
+              playerPlaybackStrategy,
+            )}
+          />
+        ) : (
+          <object
+            aria-hidden="true"
+            className="tv-avplay-stage"
+            type="application/avplayer"
+          />
+        )}
         {playerBlackoutVisible ? (
           <div className="tv-player-blackout" aria-hidden="true" />
         ) : null}
@@ -3509,6 +3990,22 @@ function getPlaybackStrategy(
   strategies: Record<string, PlaybackStrategy>,
 ) {
   return strategies[item.id] ?? getInitialPlaybackStrategy(item)
+}
+
+function getPlaybackEngine(
+  item: MediaItem,
+  strategy: PlaybackStrategy,
+): PlayerEngine {
+  if (
+    strategy === 'native' &&
+    !item.browserPlayable &&
+    isTvNativePlaybackCandidate(item) &&
+    Boolean((window as MyHomeMediaServerWindow).webapis?.avplay)
+  ) {
+    return 'avplay'
+  }
+
+  return 'html'
 }
 
 function isTvNativePlaybackCandidate(item: MediaItem) {
