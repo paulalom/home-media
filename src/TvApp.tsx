@@ -31,6 +31,10 @@ declare const __HOME_MEDIA_APP_VERSION__: string
 
 type MediaCategory = 'movie' | 'show' | 'other'
 type LibraryConnectionPhase = 'idle' | 'loading' | 'polling'
+type LibraryErrorState = {
+  diagnostics: string[]
+  message: string
+}
 type RemoteAction =
   | 'back'
   | 'down'
@@ -430,7 +434,7 @@ function TvApp() {
   const [canLoadArtwork, setCanLoadArtwork] = useState(false)
   const [clientProfile] = useState(readClientDeviceProfile)
   const [detailState, setDetailState] = useState<DetailState | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<LibraryErrorState | null>(null)
   const [focus, setFocus] = useState<FocusPosition>({
     itemIndex: 0,
     sectionIndex: 0,
@@ -1109,7 +1113,7 @@ function TvApp() {
         didTimeOut = true
         settled = true
         controller.abort()
-        setError(getLibraryRequestTimeoutMessage(apiBase))
+        setError(getLibraryRequestTimeoutError(apiBase))
         setIsLoading(false)
         scheduleConnectionPoll()
       }, libraryRequestTimeoutMs)
@@ -1141,8 +1145,8 @@ function TvApp() {
           window.clearTimeout(timeoutId)
           setError(
             didTimeOut
-              ? getLibraryRequestTimeoutMessage(apiBase)
-              : getLibraryRequestErrorMessage(requestError, apiBase),
+              ? getLibraryRequestTimeoutError(apiBase)
+              : getLibraryRequestError(requestError, apiBase),
           )
           setIsLoading(false)
 
@@ -3634,7 +3638,12 @@ function TvApp() {
         </div>
       </section>
 
-      {error ? <section className="tv-error">{error}</section> : null}
+      {error ? (
+        <section aria-live="assertive" className="tv-error">
+          <strong>{error.message}</strong>
+          <pre>{error.diagnostics.join('\n')}</pre>
+        </section>
+      ) : null}
 
       {libraryConnectionStatus ? (
         <section
@@ -5462,28 +5471,40 @@ function getLibraryConnectionStatusClassName(phase: LibraryConnectionPhase) {
     .join(' ')
 }
 
-function getLibraryRequestTimeoutMessage(apiBase: string) {
-  return addLibraryRequestDiagnostics(`Library request timed out after ${
-    libraryRequestTimeoutMs / 1000
-  } seconds. Check that My Home Media Server is running at ${getLibraryServerLabel(
-    apiBase,
-  )} and reachable from this TV. The TV will keep checking every ${
-    libraryConnectionPollIntervalMs / 1000
-  } seconds.`, null, apiBase)
+function getLibraryRequestTimeoutError(apiBase: string): LibraryErrorState {
+  return {
+    diagnostics: getLibraryRequestDiagnosticLines(null, apiBase),
+    message: `Library request timed out after ${
+      libraryRequestTimeoutMs / 1000
+    } seconds. Check that My Home Media Server is running at ${getLibraryServerLabel(
+      apiBase,
+    )} and reachable from this TV. The TV will keep checking every ${
+      libraryConnectionPollIntervalMs / 1000
+    } seconds.`,
+  }
 }
 
-function getLibraryRequestErrorMessage(error: unknown, apiBase: string) {
+function getLibraryRequestError(
+  error: unknown,
+  apiBase: string,
+): LibraryErrorState {
   const message = getErrorMessage(error)
 
   if (isLibraryConnectionErrorMessage(message)) {
-    return addLibraryRequestDiagnostics(`${message}. Check that My Home Media Server is running at ${getLibraryServerLabel(
-      apiBase,
-    )} and that this TV is on the same network. The TV will keep checking every ${
-      libraryConnectionPollIntervalMs / 1000
-    } seconds.`, error, apiBase)
+    return {
+      diagnostics: getLibraryRequestDiagnosticLines(error, apiBase),
+      message: `${message}. Check that My Home Media Server is running at ${getLibraryServerLabel(
+        apiBase,
+      )} and that this TV is on the same network. The TV will keep checking every ${
+        libraryConnectionPollIntervalMs / 1000
+      } seconds.`,
+    }
   }
 
-  return addLibraryRequestDiagnostics(message, error, apiBase)
+  return {
+    diagnostics: getLibraryRequestDiagnosticLines(error, apiBase),
+    message,
+  }
 }
 
 function isLibraryConnectionFailure(error: unknown, didTimeOut: boolean) {
@@ -5504,19 +5525,8 @@ function formatMillisecondsAsSeconds(milliseconds: number) {
   return Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1)
 }
 
-function addLibraryRequestDiagnostics(
-  message: string,
-  error: unknown,
-  apiBase: string,
-) {
-  return `${message}\n\nDiagnostics:\n${formatLibraryRequestDiagnostics(
-    error,
-    apiBase,
-  )}`
-}
-
-function formatLibraryRequestDiagnostics(error: unknown, apiBase: string) {
-  const lines = [
+function getLibraryRequestDiagnosticLines(error: unknown, apiBase: string) {
+  return [
     `Request URL: ${buildApiUrl('/api/library', apiBase)}`,
     `Server URL: ${getLibraryServerLabel(apiBase)}`,
     `Page URL: ${window.location.href}`,
@@ -5527,8 +5537,6 @@ function formatLibraryRequestDiagnostics(error: unknown, apiBase: string) {
     `User agent: ${navigator.userAgent}`,
     ...formatErrorDiagnosticLines(error),
   ]
-
-  return lines.join('\n')
 }
 
 function formatErrorDiagnosticLines(

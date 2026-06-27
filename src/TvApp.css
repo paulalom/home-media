@@ -218,8 +218,24 @@ button {
   background: #2a1210;
   border: 1px solid #7c332b;
   color: #ffd9d4;
+  display: grid;
+  gap: 10px;
+  max-height: 32vh;
   overflow-wrap: anywhere;
-  white-space: pre-line;
+  overflow-y: auto;
+}
+
+.tv-error strong {
+  color: #fff5f2;
+  line-height: 1.22;
+}
+
+.tv-error pre {
+  color: #ffc7bd;
+  font: 0.72rem/1.35 ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono',
+    monospace;
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .tv-loading {
