@@ -2,8 +2,14 @@ import { defineConfig } from 'vite'
 import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import legacy from '@vitejs/plugin-legacy'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { handleMediaApi } from './server/media-library'
+
+const packageJson = JSON.parse(
+  readFileSync(new URL('./package.json', import.meta.url), 'utf8'),
+) as { version?: string }
+const appVersion = packageJson.version ?? '0.0.0'
 
 function mediaApiPlugin(): Plugin {
   return {
@@ -43,6 +49,9 @@ export default defineConfig({
         tv: fileURLToPath(new URL('./tv.html', import.meta.url)),
       },
     },
+  },
+  define: {
+    __HOME_MEDIA_APP_VERSION__: JSON.stringify(appVersion),
   },
   plugins: [
     react(),

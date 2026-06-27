@@ -27,6 +27,8 @@ import {
   type PlaybackRecord,
 } from './playback-metadata'
 
+declare const __HOME_MEDIA_APP_VERSION__: string
+
 type MediaCategory = 'movie' | 'show' | 'other'
 type LibraryConnectionPhase = 'idle' | 'loading' | 'polling'
 type RemoteAction =
@@ -3579,7 +3581,7 @@ function TvApp() {
     <main className="tv-shell">
       <header className="tv-topbar">
         <div>
-          <p>My Home Media Server</p>
+          <p>My Home Media Server v{__HOME_MEDIA_APP_VERSION__}</p>
           <h1>{selectedTitle?.title ?? 'Loading library'}</h1>
         </div>
         <div className="tv-status">
