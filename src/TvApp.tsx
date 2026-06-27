@@ -314,6 +314,8 @@ type MyHomeMediaServerWindow = Window & {
 const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
 const clientProfileRequestTimeoutMs = 5000
+const libraryConnectionPollIntervalMs = 5000
+const libraryConnectionPollTimeoutMs = 4500
 const libraryRequestTimeoutMs = 15000
 const maxRowItems = 28
 const playerHudHideDelayMs = 1000
@@ -405,6 +407,17 @@ async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
   }
 
   return (await response.json()) as LibraryResponse
+}
+
+async function fetchServerConnection(apiBase: string, signal?: AbortSignal) {
+  const response = await fetch(buildApiUrl('/api/client-profile', apiBase), {
+    cache: 'no-store',
+    signal,
+  })
+
+  if (!response.ok) {
+    throw new Error(`Server connection failed (${response.status})`)
+  }
 }
 
 function TvApp() {
@@ -999,38 +1012,121 @@ function TvApp() {
       return
     }
 
-    const controller = new AbortController()
-    let didTimeOut = false
-    const timeoutId = window.setTimeout(() => {
-      didTimeOut = true
-      controller.abort()
-    }, libraryRequestTimeoutMs)
+    let isCurrent = true
+    let pollTimeoutId: number | null = null
+    let requestController: AbortController | null = null
 
-    fetchLibrary(apiBase, controller.signal)
-      .then((nextLibrary) => {
-        setLibrary(nextLibrary)
-        setError(null)
-      })
-      .catch((requestError: unknown) => {
-        if (!controller.signal.aborted || didTimeOut) {
+    function clearConnectionPoll() {
+      if (pollTimeoutId !== null) {
+        window.clearTimeout(pollTimeoutId)
+        pollTimeoutId = null
+      }
+    }
+
+    function scheduleConnectionPoll(startedAt = window.performance.now()) {
+      if (!isCurrent) {
+        return
+      }
+
+      clearConnectionPoll()
+
+      const elapsedMs = window.performance.now() - startedAt
+      const retryDelayMs = Math.max(
+        libraryConnectionPollIntervalMs - elapsedMs,
+        0,
+      )
+
+      pollTimeoutId = window.setTimeout(() => {
+        pollTimeoutId = null
+        pollForServerConnection()
+      }, retryDelayMs)
+    }
+
+    function pollForServerConnection() {
+      const controller = new AbortController()
+      const startedAt = window.performance.now()
+      let didTimeOut = false
+      requestController = controller
+
+      const timeoutId = window.setTimeout(() => {
+        didTimeOut = true
+        controller.abort()
+      }, libraryConnectionPollTimeoutMs)
+
+      fetchServerConnection(apiBase, controller.signal)
+        .then(() => {
+          if (!isCurrent || controller.signal.aborted) {
+            return
+          }
+
+          loadLibrary()
+        })
+        .catch(() => {
+          if (isCurrent && (!controller.signal.aborted || didTimeOut)) {
+            scheduleConnectionPoll(startedAt)
+          }
+        })
+        .finally(() => {
+          window.clearTimeout(timeoutId)
+
+          if (requestController === controller) {
+            requestController = null
+          }
+        })
+    }
+
+    function loadLibrary() {
+      const controller = new AbortController()
+      let didTimeOut = false
+      requestController = controller
+
+      const timeoutId = window.setTimeout(() => {
+        didTimeOut = true
+        controller.abort()
+      }, libraryRequestTimeoutMs)
+
+      fetchLibrary(apiBase, controller.signal)
+        .then((nextLibrary) => {
+          if (!isCurrent || controller.signal.aborted) {
+            return
+          }
+
+          clearConnectionPoll()
+          setLibrary(nextLibrary)
+          setError(null)
+          setIsLoading(false)
+        })
+        .catch((requestError: unknown) => {
+          if (!isCurrent || (controller.signal.aborted && !didTimeOut)) {
+            return
+          }
+
           setError(
             didTimeOut
               ? getLibraryRequestTimeoutMessage(apiBase)
               : getLibraryRequestErrorMessage(requestError, apiBase),
           )
-        }
-      })
-      .finally(() => {
-        window.clearTimeout(timeoutId)
-
-        if (!controller.signal.aborted || didTimeOut) {
           setIsLoading(false)
-        }
-      })
+
+          if (isLibraryConnectionFailure(requestError, didTimeOut)) {
+            scheduleConnectionPoll()
+          }
+        })
+        .finally(() => {
+          window.clearTimeout(timeoutId)
+
+          if (requestController === controller) {
+            requestController = null
+          }
+        })
+    }
+
+    loadLibrary()
 
     return () => {
-      window.clearTimeout(timeoutId)
-      controller.abort()
+      isCurrent = false
+      clearConnectionPoll()
+      requestController?.abort()
     }
   }, [apiBase, isAppVisible, resumeRefreshKey])
 
@@ -5276,19 +5372,31 @@ function getLibraryRequestTimeoutMessage(apiBase: string) {
     libraryRequestTimeoutMs / 1000
   } seconds. Check that My Home Media Server is running at ${getLibraryServerLabel(
     apiBase,
-  )} and reachable from this TV.`
+  )} and reachable from this TV. The TV will keep checking every ${
+    libraryConnectionPollIntervalMs / 1000
+  } seconds.`
 }
 
 function getLibraryRequestErrorMessage(error: unknown, apiBase: string) {
   const message = getErrorMessage(error)
 
-  if (/failed to fetch|load failed|network|connection|refused/i.test(message)) {
+  if (isLibraryConnectionErrorMessage(message)) {
     return `${message}. Check that My Home Media Server is running at ${getLibraryServerLabel(
       apiBase,
-    )} and that this TV is on the same network.`
+    )} and that this TV is on the same network. The TV will keep checking every ${
+      libraryConnectionPollIntervalMs / 1000
+    } seconds.`
   }
 
   return message
+}
+
+function isLibraryConnectionFailure(error: unknown, didTimeOut: boolean) {
+  return didTimeOut || isLibraryConnectionErrorMessage(getErrorMessage(error))
+}
+
+function isLibraryConnectionErrorMessage(message: string) {
+  return /failed to fetch|load failed|network|connection|refused/i.test(message)
 }
 
 function getLibraryServerLabel(apiBase: string) {
