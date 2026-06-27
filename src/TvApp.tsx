@@ -1008,10 +1008,6 @@ function TvApp() {
   }, [])
 
   useEffect(() => {
-    if (!isAppVisible) {
-      return
-    }
-
     let isCurrent = true
     let pollTimeoutId: number | null = null
     let requestController: AbortController | null = null
@@ -1161,7 +1157,7 @@ function TvApp() {
       clearConnectionPoll()
       requestController?.abort()
     }
-  }, [apiBase, isAppVisible, resumeRefreshKey])
+  }, [apiBase, resumeRefreshKey])
 
   const sections = useMemo(
     () => buildTvSections(library?.items ?? [], playbackHistory),
@@ -2970,6 +2966,13 @@ function TvApp() {
   }, [apiBase, playerEngine, playerItem, playerPlaybackStrategy])
 
   useEffect(() => {
+    function refreshVisibleApp() {
+      registerSamsungRemoteKeys()
+      setIsAppVisible(true)
+      setIsLoading(true)
+      setResumeRefreshKey((currentKey) => currentKey + 1)
+    }
+
     function handleVisibilityChange() {
       if (document.hidden) {
         if (playerItem) {
@@ -2985,16 +2988,17 @@ function TvApp() {
         return
       }
 
-      registerSamsungRemoteKeys()
-      setIsAppVisible(true)
-      setIsLoading(true)
-      setResumeRefreshKey((currentKey) => currentKey + 1)
+      refreshVisibleApp()
     }
 
     document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('focus', refreshVisibleApp)
+    window.addEventListener('pageshow', refreshVisibleApp)
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('focus', refreshVisibleApp)
+      window.removeEventListener('pageshow', refreshVisibleApp)
     }
   })
 
