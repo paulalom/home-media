@@ -324,6 +324,10 @@ button {
 
 .tv-card.selected span,
 .tv-card.selected p {
+  color: #15181b;
+}
+
+.tv-card.selected span {
   color: #59656b;
 }
 
@@ -373,6 +377,10 @@ button {
 .tv-progress {
   position: relative;
   z-index: 1;
+}
+
+.tv-card p {
+  color: var(--tv-text);
 }
 
 .tv-progress {
