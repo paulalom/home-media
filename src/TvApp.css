@@ -218,6 +218,8 @@ button {
   background: #2a1210;
   border: 1px solid #7c332b;
   color: #ffd9d4;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
 }
 
 .tv-loading {

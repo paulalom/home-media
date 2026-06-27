@@ -5461,27 +5461,27 @@ function getLibraryConnectionStatusClassName(phase: LibraryConnectionPhase) {
 }
 
 function getLibraryRequestTimeoutMessage(apiBase: string) {
-  return `Library request timed out after ${
+  return addLibraryRequestDiagnostics(`Library request timed out after ${
     libraryRequestTimeoutMs / 1000
   } seconds. Check that My Home Media Server is running at ${getLibraryServerLabel(
     apiBase,
   )} and reachable from this TV. The TV will keep checking every ${
     libraryConnectionPollIntervalMs / 1000
-  } seconds.`
+  } seconds.`, null, apiBase)
 }
 
 function getLibraryRequestErrorMessage(error: unknown, apiBase: string) {
   const message = getErrorMessage(error)
 
   if (isLibraryConnectionErrorMessage(message)) {
-    return `${message}. Check that My Home Media Server is running at ${getLibraryServerLabel(
+    return addLibraryRequestDiagnostics(`${message}. Check that My Home Media Server is running at ${getLibraryServerLabel(
       apiBase,
     )} and that this TV is on the same network. The TV will keep checking every ${
       libraryConnectionPollIntervalMs / 1000
-    } seconds.`
+    } seconds.`, error, apiBase)
   }
 
-  return message
+  return addLibraryRequestDiagnostics(message, error, apiBase)
 }
 
 function isLibraryConnectionFailure(error: unknown, didTimeOut: boolean) {
@@ -5500,6 +5500,152 @@ function formatMillisecondsAsSeconds(milliseconds: number) {
   const seconds = milliseconds / 1000
 
   return Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1)
+}
+
+function addLibraryRequestDiagnostics(
+  message: string,
+  error: unknown,
+  apiBase: string,
+) {
+  return `${message}\n\nDiagnostics:\n${formatLibraryRequestDiagnostics(
+    error,
+    apiBase,
+  )}`
+}
+
+function formatLibraryRequestDiagnostics(error: unknown, apiBase: string) {
+  const lines = [
+    `Request URL: ${buildApiUrl('/api/library', apiBase)}`,
+    `Server URL: ${getLibraryServerLabel(apiBase)}`,
+    `Page URL: ${window.location.href}`,
+    `Network: navigator.onLine=${String(navigator.onLine)}`,
+    `Document: hidden=${String(document.hidden)}, visibility=${
+      document.visibilityState
+    }`,
+    `User agent: ${navigator.userAgent}`,
+    ...formatErrorDiagnosticLines(error),
+  ]
+
+  return lines.join('\n')
+}
+
+function formatErrorDiagnosticLines(
+  error: unknown,
+  label = 'Error',
+  seen = new Set<unknown>(),
+): string[] {
+  if (error === null) {
+    return []
+  }
+
+  if (seen.has(error)) {
+    return [`${label}: circular reference`]
+  }
+
+  if (typeof error === 'object' || typeof error === 'function') {
+    seen.add(error)
+  }
+
+  if (error instanceof Error) {
+    const lines = [`${label}: ${error.name}: ${error.message || '(empty message)'}`]
+    const extraProperties = formatErrorExtraProperties(error)
+    const stack = formatErrorStack(error.stack)
+    const cause = (error as Error & { cause?: unknown }).cause
+
+    if (extraProperties) {
+      lines.push(`${label} properties: ${extraProperties}`)
+    }
+
+    if (cause !== undefined) {
+      lines.push(...formatErrorDiagnosticLines(cause, `${label} cause`, seen))
+    }
+
+    if (stack) {
+      lines.push(`${label} stack: ${stack}`)
+    }
+
+    return lines
+  }
+
+  if (isRecord(error)) {
+    return [
+      `${label}: ${getObjectTypeName(error)} ${formatErrorExtraProperties(
+        error,
+      )}`.trim(),
+    ]
+  }
+
+  if (error === undefined) {
+    return [`${label}: undefined`]
+  }
+
+  return [`${label}: ${String(error)}`]
+}
+
+function formatErrorExtraProperties(value: object) {
+  const record = value as Record<string, unknown>
+  const propertyNames = Array.from(
+    new Set([
+      'code',
+      'errno',
+      'type',
+      'status',
+      'statusCode',
+      'statusText',
+      'eventType',
+      'eventMessage',
+      ...Object.keys(record),
+    ]),
+  ).filter(
+    (propertyName) =>
+      !['cause', 'message', 'name', 'stack'].includes(propertyName) &&
+      record[propertyName] !== undefined,
+  )
+
+  return propertyNames
+    .slice(0, 12)
+    .map(
+      (propertyName) =>
+        `${propertyName}=${formatDiagnosticValue(record[propertyName])}`,
+    )
+    .join('; ')
+}
+
+function formatErrorStack(stack: string | undefined) {
+  if (!stack) {
+    return ''
+  }
+
+  return stack
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 6)
+    .join(' | ')
+}
+
+function formatDiagnosticValue(value: unknown) {
+  if (value instanceof Error) {
+    return `${value.name}: ${value.message}`
+  }
+
+  if (isRecord(value)) {
+    try {
+      return truncateDiagnosticValue(JSON.stringify(value))
+    } catch {
+      return getObjectTypeName(value)
+    }
+  }
+
+  return truncateDiagnosticValue(String(value))
+}
+
+function truncateDiagnosticValue(value: string) {
+  return value.length > 220 ? `${value.slice(0, 217)}...` : value
+}
+
+function getObjectTypeName(value: object) {
+  return Object.prototype.toString.call(value)
 }
 
 function getErrorMessage(error: unknown) {
