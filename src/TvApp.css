@@ -340,6 +340,22 @@ button {
   opacity: 0.18;
 }
 
+.tv-card-art-placeholder {
+  background:
+    linear-gradient(135deg, rgb(55 182 166 / 18%), transparent 46%),
+    linear-gradient(315deg, rgb(232 93 79 / 18%), transparent 42%),
+    var(--tv-panel-strong);
+  height: 100%;
+  inset: 0;
+  opacity: 0.62;
+  position: absolute;
+  width: 100%;
+}
+
+.tv-card.selected .tv-card-art-placeholder {
+  opacity: 0.28;
+}
+
 .tv-card strong {
   display: -webkit-box;
   font-size: 1.08rem;

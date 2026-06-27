@@ -321,6 +321,7 @@ type MyHomeMediaServerWindow = Window & {
 const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
 const clientProfileRequestTimeoutMs = 5000
+const libraryArtworkRowLoadRadius = 2
 const libraryConnectionPollIntervalMs = 5000
 const libraryConnectionPollTimeoutMs = 4500
 const libraryRequestTimeoutMs = 15000
@@ -3662,7 +3663,8 @@ function TvApp() {
           {sections.map((section, sectionIndex) => {
             const shouldLoadArtwork =
               canLoadArtwork &&
-              Math.abs(sectionIndex - safeFocus.sectionIndex) <= 1
+              Math.abs(sectionIndex - safeFocus.sectionIndex) <=
+                libraryArtworkRowLoadRadius
 
             return (
               <section
@@ -3706,6 +3708,11 @@ function TvApp() {
                             loading="lazy"
                             onError={hideFailedArtwork}
                             src={resolveMediaUrl(title.artworkUrl, apiBase)}
+                          />
+                        ) : title.artworkUrl ? (
+                          <div
+                            aria-hidden="true"
+                            className="tv-card-art-placeholder"
                           />
                         ) : null}
                         <span>{title.kind === 'show' ? 'TV' : 'Movie'}</span>
