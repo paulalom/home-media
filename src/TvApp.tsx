@@ -28,6 +28,7 @@ import {
 } from './playback-metadata'
 
 type MediaCategory = 'movie' | 'show' | 'other'
+type LibraryConnectionPhase = 'idle' | 'loading' | 'polling'
 type RemoteAction =
   | 'back'
   | 'down'
@@ -435,6 +436,8 @@ function TvApp() {
   const [isAppVisible, setIsAppVisible] = useState(() => !document.hidden)
   const [isLoading, setIsLoading] = useState(true)
   const [library, setLibrary] = useState<LibraryResponse | null>(null)
+  const [libraryConnectionPhase, setLibraryConnectionPhase] =
+    useState<LibraryConnectionPhase>('loading')
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
     readLocalPlaybackHistory,
   )
@@ -1025,6 +1028,7 @@ function TvApp() {
       }
 
       clearConnectionPoll()
+      setLibraryConnectionPhase('polling')
 
       const elapsedMs = window.performance.now() - startedAt
       const retryDelayMs = Math.max(
@@ -1044,6 +1048,7 @@ function TvApp() {
       let didTimeOut = false
       let settled = false
       requestController = controller
+      setLibraryConnectionPhase('polling')
 
       const timeoutId = window.setTimeout(() => {
         if (!isCurrent || settled) {
@@ -1092,6 +1097,7 @@ function TvApp() {
       let didTimeOut = false
       let settled = false
       requestController = controller
+      setLibraryConnectionPhase('loading')
 
       const timeoutId = window.setTimeout(() => {
         if (!isCurrent || settled) {
@@ -1116,6 +1122,7 @@ function TvApp() {
           window.clearTimeout(timeoutId)
           clearConnectionPoll()
           setLibrary(nextLibrary)
+          setLibraryConnectionPhase('idle')
           setError(null)
           setIsLoading(false)
         })
@@ -1139,6 +1146,8 @@ function TvApp() {
 
           if (isLibraryConnectionFailure(requestError, didTimeOut)) {
             scheduleConnectionPoll()
+          } else {
+            setLibraryConnectionPhase('idle')
           }
         })
         .finally(() => {
@@ -1174,6 +1183,10 @@ function TvApp() {
   const selectedPlayback = selectedItem
     ? playbackHistory[selectedItem.id] ?? null
     : null
+  const libraryConnectionStatus = getLibraryConnectionStatus(
+    libraryConnectionPhase,
+    apiBase,
+  )
   const selectedTitleIsContinue = activeSection?.id === 'continue'
   const detailTitle = detailState?.title ?? null
   const detailItemIndex = detailTitle
@@ -3621,11 +3634,19 @@ function TvApp() {
 
       {error ? <section className="tv-error">{error}</section> : null}
 
-      {isLoading ? (
-        <section className="tv-loading">
-          Loading library from {apiBase || 'this host'}
+      {libraryConnectionStatus ? (
+        <section
+          aria-live="polite"
+          className={getLibraryConnectionStatusClassName(
+            libraryConnectionPhase,
+          )}
+        >
+          <strong>{libraryConnectionStatus.title}</strong>
+          <span>{libraryConnectionStatus.detail}</span>
         </section>
-      ) : sections.length ? (
+      ) : null}
+
+      {!isLoading && sections.length ? (
         <section className="tv-rows" aria-label="Media rows" ref={rowsRef}>
           {sections.map((section, sectionIndex) => {
             const shouldLoadArtwork =
@@ -5404,6 +5425,41 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max)
 }
 
+function getLibraryConnectionStatus(
+  phase: LibraryConnectionPhase,
+  apiBase: string,
+) {
+  const serverLabel = getLibraryServerLabel(apiBase)
+
+  if (phase === 'loading') {
+    return {
+      detail: `Server: ${serverLabel}. Request: /api/library. Timeout: ${formatMillisecondsAsSeconds(
+        libraryRequestTimeoutMs,
+      )} seconds.`,
+      title: 'Loading library',
+    }
+  }
+
+  if (phase === 'polling') {
+    return {
+      detail: `Server: ${serverLabel}. Polling /api/client-profile every ${formatMillisecondsAsSeconds(
+        libraryConnectionPollIntervalMs,
+      )} seconds; probe timeout ${formatMillisecondsAsSeconds(
+        libraryConnectionPollTimeoutMs,
+      )} seconds.`,
+      title: 'Retrying server connection',
+    }
+  }
+
+  return null
+}
+
+function getLibraryConnectionStatusClassName(phase: LibraryConnectionPhase) {
+  return ['tv-loading', phase === 'polling' ? 'retrying' : '']
+    .filter(Boolean)
+    .join(' ')
+}
+
 function getLibraryRequestTimeoutMessage(apiBase: string) {
   return `Library request timed out after ${
     libraryRequestTimeoutMs / 1000
@@ -5438,6 +5494,12 @@ function isLibraryConnectionErrorMessage(message: string) {
 
 function getLibraryServerLabel(apiBase: string) {
   return apiBase || 'this host'
+}
+
+function formatMillisecondsAsSeconds(milliseconds: number) {
+  const seconds = milliseconds / 1000
+
+  return Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1)
 }
 
 function getErrorMessage(error: unknown) {

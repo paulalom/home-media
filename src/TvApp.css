@@ -224,6 +224,22 @@ button {
   background: var(--tv-panel);
   border: 1px solid var(--tv-border);
   color: var(--tv-text-soft);
+  display: grid;
+  gap: 6px;
+}
+
+.tv-loading.retrying {
+  border-color: rgb(255 207 90 / 68%);
+}
+
+.tv-loading strong {
+  color: var(--tv-text);
+}
+
+.tv-loading span {
+  color: var(--tv-muted);
+  font-size: 0.82rem;
+  font-weight: 750;
 }
 
 .tv-rows {
