@@ -49,7 +49,7 @@ Write-InstallLog "Installing startup task $TaskPath$TaskName for $currentUser fr
 
 $action = New-ScheduledTaskAction `
   -Execute $powerShellExe `
-  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$StartScript`" -Background -Port $serverPort" `
+  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$StartScript`" -Background -Update" `
   -WorkingDirectory $ProjectRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 $principal = New-ScheduledTaskPrincipal `

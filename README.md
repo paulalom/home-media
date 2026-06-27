@@ -35,10 +35,15 @@ This repo includes Windows helpers for running the LAN dev server:
 
 The startup task installer creates a per-user Scheduled Task named
 `HomeMediaServer` that runs when the current Windows user logs in. The task runs
-`npm run dev:lan` on the port configured in `package.json`, falling back to port
-`23232` if no port is specified. Because it runs as the signed-in user, Desktop
+the current checkout on the port configured in `package.json`, falling back to
+port `23232` if no port is specified. At startup it first attempts a safe
+`git pull --ff-only` when the worktree is clean, then refreshes npm dependencies
+only when `package.json` or `package-lock.json` has changed. If the pull cannot
+fast-forward or the worktree has local changes, it skips the update and still
+starts the installed checkout. Because it runs as the signed-in user, Desktop
 sharing, metadata, artwork, and preview-cache folders resolve under that user's
-profile.
+profile. Startup/update logs are written to
+`%LOCALAPPDATA%/My Home Media Server/logs/startup.log`.
 
 If you previously installed the old machine-level WinSW service, remove it with:
 
