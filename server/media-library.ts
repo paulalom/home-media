@@ -3508,7 +3508,7 @@ Add-Type -Namespace HomeMedia -Name NativePower -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
 public static extern uint SetThreadExecutionState(uint esFlags);
 '@
-$continuous = [uint32]0x80000000
+$continuous = [uint32]2147483648
 $systemRequired = [uint32]0x00000001
 $required = $continuous -bor $systemRequired
 try {
