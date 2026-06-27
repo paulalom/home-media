@@ -2,7 +2,7 @@
 <widget xmlns="http://www.w3.org/ns/widgets"
   xmlns:tizen="http://tizen.org/ns/widgets"
   id="https://my-home-media-server.local/tizen"
-  version="0.6.2"
+  version="0.6.3"
   viewmodes="maximized">
   <tizen:application id="MHMServer1.MyHomeMediaServer" package="MHMServer1" required_version="5.5" />
   <tizen:profile name="tv-samsung" />

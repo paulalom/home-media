@@ -3468,8 +3468,8 @@ function TvApp() {
 
         <section className="tv-detail-body">
           <div className="tv-detail-heading">
-            <h2>{detailTitle.kind === 'show' ? 'Episodes' : 'Title'}</h2>
-            <span>{detailTitle.items.length}</span>
+            <h2>{getDetailItemsHeading(detailTitle)}</h2>
+            <span>{getDetailItemsCountLabel(detailTitle)}</span>
           </div>
           <div className="tv-detail-list" ref={detailListRef}>
             {detailTitle.items.map((item, itemIndex) => {
@@ -3853,7 +3853,14 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
     )[0]
 
   if (!watchedEpisode) {
-    return episodes.find(isTvNativePlaybackCandidate) ?? episodes[0]
+    const regularEpisodes = episodes.filter((episode) => !isShowExtraItem(episode))
+
+    return (
+      regularEpisodes.find(isTvNativePlaybackCandidate) ??
+      regularEpisodes[0] ??
+      episodes.find(isTvNativePlaybackCandidate) ??
+      episodes[0]
+    )
   }
 
   const watchedRecord = history[watchedEpisode.id]
@@ -3866,7 +3873,19 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
     (episode) => episode.id === watchedEpisode.id,
   )
 
-  return episodes[watchedIndex + 1] ?? watchedEpisode
+  if (isShowExtraItem(watchedEpisode)) {
+    return watchedEpisode
+  }
+
+  const nextRegularEpisode = episodes
+    .slice(watchedIndex + 1)
+    .find((episode) => !isShowExtraItem(episode))
+
+  if (nextRegularEpisode) {
+    return nextRegularEpisode
+  }
+
+  return watchedEpisode
 }
 
 function getPlayerEpisodeSwitchOptions(
@@ -3883,7 +3902,8 @@ function getPlayerEpisodeSwitchOptions(
     .filter(
       (item) =>
         item.category === 'show' &&
-        getShowGroupKey(item) === currentShowKey,
+        getShowGroupKey(item) === currentShowKey &&
+        !isShowExtraItem(item),
     )
     .sort(sortEpisodes)
   const currentIndex = episodes.findIndex(
@@ -3923,13 +3943,22 @@ function getShowGroupKey(item: MediaItem) {
 }
 
 function formatShowSubtitle(episodes: MediaItem[]) {
-  const episodeCount = episodes.length
-  const seasonCount = getShowSeasonCount(episodes)
+  const regularEpisodes = episodes.filter((episode) => !isShowExtraItem(episode))
+  const extraCount = episodes.length - regularEpisodes.length
+  const episodeCount = regularEpisodes.length
+  const seasonCount = getShowSeasonCount(regularEpisodes)
   const episodeLabel = formatCountLabel(episodeCount, 'episode')
+  const labels = [
+    seasonCount > 0
+      ? `${episodeLabel}, ${formatCountLabel(seasonCount, 'season')}`
+      : episodeLabel,
+  ]
 
-  return seasonCount > 0
-    ? `${episodeLabel}, ${formatCountLabel(seasonCount, 'season')}`
-    : episodeLabel
+  if (extraCount > 0) {
+    labels.push(formatCountLabel(extraCount, 'extra'))
+  }
+
+  return labels.join(', ')
 }
 
 function getShowSeasonCount(episodes: MediaItem[]) {
@@ -3946,12 +3975,115 @@ function formatCountLabel(count: number, label: string) {
   return `${count} ${label}${count === 1 ? '' : 's'}`
 }
 
+function getDetailItemsHeading(title: TvTitle) {
+  if (title.kind !== 'show') {
+    return 'Title'
+  }
+
+  return title.items.some(isShowExtraItem) ? 'Episodes & Extras' : 'Episodes'
+}
+
+function getDetailItemsCountLabel(title: TvTitle) {
+  if (title.kind !== 'show') {
+    return String(title.items.length)
+  }
+
+  const regularEpisodeCount = title.items.filter(
+    (item) => !isShowExtraItem(item),
+  ).length
+  const extraCount = title.items.length - regularEpisodeCount
+
+  if (extraCount === 0) {
+    return String(regularEpisodeCount)
+  }
+
+  return `${regularEpisodeCount} + ${extraCount}`
+}
+
+function isShowExtraItem(item: MediaItem) {
+  return Boolean(getShowExtraGroupLabel(item))
+}
+
+function getShowExtraGroupLabel(item: MediaItem) {
+  if (item.category !== 'show') {
+    return null
+  }
+
+  const folders = getShowContentFolders(item)
+
+  if (!folders.length) {
+    return null
+  }
+
+  const [firstFolder, ...nestedFolders] = folders
+
+  if (isShowExtraFolderName(firstFolder) || !isShowSeasonFolderName(firstFolder)) {
+    return formatShowFolderLabel(firstFolder)
+  }
+
+  const nestedExtraFolder = nestedFolders.find(isShowExtraFolderName)
+
+  return nestedExtraFolder ? formatShowFolderLabel(nestedExtraFolder) : null
+}
+
+function getShowContentFolders(item: MediaItem) {
+  const pathParts = item.relativePath.split(/[\\/]/).filter(Boolean)
+
+  return pathParts.slice(2, -1)
+}
+
+function isShowSeasonFolderName(folderName: string) {
+  const normalizedName = normalizeShowFolderName(folderName)
+
+  return (
+    /^(?:season|series)\s*\d{1,3}$/.test(normalizedName) ||
+    /^s\d{1,3}$/.test(normalizedName) ||
+    /^specials?$/.test(normalizedName)
+  )
+}
+
+function isShowExtraFolderName(folderName: string) {
+  return /\b(?:bonus|deleted|extra|featurette|interview|making|promo|soundtrack|trailer)s?\b/.test(
+    normalizeShowFolderName(folderName),
+  )
+}
+
+function normalizeShowFolderName(folderName: string) {
+  return folderName
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function formatShowFolderLabel(folderName: string) {
+  const normalizedName = folderName
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return normalizedName || 'Extras'
+}
+
 function getDetailSeasonHeading(
   title: TvTitle,
   item: MediaItem,
   previousItem: MediaItem | undefined,
 ) {
-  if (title.kind !== 'show' || !Number.isInteger(item.seasonNumber)) {
+  if (title.kind !== 'show') {
+    return null
+  }
+
+  const extraGroupLabel = getShowExtraGroupLabel(item)
+
+  if (extraGroupLabel) {
+    return previousItem &&
+      getShowExtraGroupLabel(previousItem) === extraGroupLabel
+      ? null
+      : `Extras - ${extraGroupLabel}`
+  }
+
+  if (!Number.isInteger(item.seasonNumber)) {
     return null
   }
 
@@ -5154,6 +5286,12 @@ function getTitleSubtitle(title: TvTitle, isContinue: boolean) {
     return title.subtitle
   }
 
+  const extraGroupLabel = getShowExtraGroupLabel(title.resumeItem)
+
+  if (extraGroupLabel) {
+    return `Extra - ${extraGroupLabel}`
+  }
+
   const episodeNumber = title.resumeItem.episodeNumber
 
   return typeof episodeNumber === 'number'
@@ -5183,7 +5321,11 @@ function getDefaultDetailItemIndex(title: TvTitle, history: PlaybackHistory) {
 }
 
 function getDetailItemLabel(item: MediaItem) {
-  return item.category === 'show' ? formatEpisodeNumber(item) : item.container
+  if (item.category !== 'show') {
+    return item.container
+  }
+
+  return isShowExtraItem(item) ? 'Extra' : formatEpisodeNumber(item)
 }
 
 function getDetailItemTitle(item: MediaItem) {
@@ -5191,7 +5333,7 @@ function getDetailItemTitle(item: MediaItem) {
 }
 
 function hasEpisodeCode(item: MediaItem) {
-  return Boolean(item.seasonNumber || item.episodeNumber)
+  return !isShowExtraItem(item) && Boolean(item.seasonNumber || item.episodeNumber)
 }
 
 function getDetailPlaybackLabel(
@@ -5429,6 +5571,26 @@ function sortByLastWatched(first: TvTitle, second: TvTitle) {
 }
 
 function sortEpisodes(first: MediaItem, second: MediaItem) {
+  const firstExtraLabel = getShowExtraGroupLabel(first)
+  const secondExtraLabel = getShowExtraGroupLabel(second)
+
+  if (Boolean(firstExtraLabel) !== Boolean(secondExtraLabel)) {
+    return firstExtraLabel ? 1 : -1
+  }
+
+  if (firstExtraLabel && secondExtraLabel) {
+    return (
+      firstExtraLabel.localeCompare(secondExtraLabel, undefined, {
+        numeric: true,
+        sensitivity: 'base',
+      }) ||
+      first.title.localeCompare(second.title, undefined, {
+        numeric: true,
+        sensitivity: 'base',
+      })
+    )
+  }
+
   return (
     (first.seasonNumber ?? 0) - (second.seasonNumber ?? 0) ||
     (first.episodeNumber ?? 0) - (second.episodeNumber ?? 0) ||
