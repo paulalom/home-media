@@ -1046,23 +1046,39 @@ function TvApp() {
       const controller = new AbortController()
       const startedAt = window.performance.now()
       let didTimeOut = false
+      let settled = false
       requestController = controller
 
       const timeoutId = window.setTimeout(() => {
+        if (!isCurrent || settled) {
+          return
+        }
+
         didTimeOut = true
+        settled = true
         controller.abort()
+        scheduleConnectionPoll(startedAt)
       }, libraryConnectionPollTimeoutMs)
 
       fetchServerConnection(apiBase, controller.signal)
         .then(() => {
-          if (!isCurrent || controller.signal.aborted) {
+          if (!isCurrent || settled) {
             return
           }
 
+          settled = true
+          window.clearTimeout(timeoutId)
           loadLibrary()
         })
         .catch(() => {
-          if (isCurrent && (!controller.signal.aborted || didTimeOut)) {
+          if (!isCurrent || settled) {
+            return
+          }
+
+          settled = true
+          window.clearTimeout(timeoutId)
+
+          if (!controller.signal.aborted || didTimeOut) {
             scheduleConnectionPoll(startedAt)
           }
         })
@@ -1078,29 +1094,46 @@ function TvApp() {
     function loadLibrary() {
       const controller = new AbortController()
       let didTimeOut = false
+      let settled = false
       requestController = controller
 
       const timeoutId = window.setTimeout(() => {
+        if (!isCurrent || settled) {
+          return
+        }
+
         didTimeOut = true
+        settled = true
         controller.abort()
+        setError(getLibraryRequestTimeoutMessage(apiBase))
+        setIsLoading(false)
+        scheduleConnectionPoll()
       }, libraryRequestTimeoutMs)
 
       fetchLibrary(apiBase, controller.signal)
         .then((nextLibrary) => {
-          if (!isCurrent || controller.signal.aborted) {
+          if (!isCurrent || settled) {
             return
           }
 
+          settled = true
+          window.clearTimeout(timeoutId)
           clearConnectionPoll()
           setLibrary(nextLibrary)
           setError(null)
           setIsLoading(false)
         })
         .catch((requestError: unknown) => {
-          if (!isCurrent || (controller.signal.aborted && !didTimeOut)) {
+          if (
+            !isCurrent ||
+            settled ||
+            (controller.signal.aborted && !didTimeOut)
+          ) {
             return
           }
 
+          settled = true
+          window.clearTimeout(timeoutId)
           setError(
             didTimeOut
               ? getLibraryRequestTimeoutMessage(apiBase)
