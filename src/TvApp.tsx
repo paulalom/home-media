@@ -2142,13 +2142,13 @@ function TvApp() {
   }
 
   function playPlayer() {
-    showPlayerHud()
     playActivePlayback()
+    showPlayerHud(true)
   }
 
   function pausePlayer() {
-    showPlayerHud()
     pauseActivePlayback()
+    showPlayerHud(false)
   }
 
   function revealPlayerHud() {
@@ -2158,7 +2158,7 @@ function TvApp() {
       updatePlayerClockFromValues(snapshot.duration, snapshot.position)
     }
 
-    showPlayerHud(true)
+    showPlayerHud()
   }
 
   function togglePlayer() {
@@ -2169,11 +2169,11 @@ function TvApp() {
     }
 
     if (snapshot.paused) {
-      showPlayerHud()
       playActivePlayback()
+      showPlayerHud(true)
     } else {
-      showPlayerHud()
       pauseActivePlayback()
+      showPlayerHud(false)
     }
   }
 
@@ -2963,11 +2963,21 @@ function TvApp() {
     playerHudTimeoutRef.current = null
   }
 
-  function showPlayerHud(autoHide = false) {
+  function shouldAutoHidePlayerHud() {
+    if (playerScanPreviewRef.current?.scanning) {
+      return false
+    }
+
+    const snapshot = readActivePlaybackSnapshot()
+
+    return Boolean(snapshot && !snapshot.paused && !snapshot.ended)
+  }
+
+  function showPlayerHud(autoHide = shouldAutoHidePlayerHud()) {
     clearPlayerHudTimeout()
     setPlayerHudVisible(true)
 
-    if (!autoHide) {
+    if (!autoHide || playerScanPreviewRef.current?.scanning) {
       return
     }
 
