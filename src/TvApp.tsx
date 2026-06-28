@@ -180,6 +180,13 @@ type ScanPreviewCacheStats = {
   warmSheetsPerDirection: number
 }
 
+type ScanPreviewRetainedWindow = {
+  firstSheetIndex: number
+  itemId: string
+  lastSheetIndex: number
+  version: string
+}
+
 type PlayerEpisodeSwitchOptions = {
   next: MediaItem | null
   previous: MediaItem | null
@@ -510,6 +517,8 @@ function TvApp() {
     new Map(),
   )
   const playerScanPreloadKeyRef = useRef('')
+  const playerScanRetainedWindowRef =
+    useRef<ScanPreviewRetainedWindow | null>(null)
   const playerScanPreviewRef = useRef<ScanPreview | null>(null)
   const playerScanVisualCacheRef = useRef<Map<string, ScanPreviewVisual>>(
     new Map(),
@@ -595,10 +604,28 @@ function TvApp() {
 
       const cacheGeneration = playerScanVisualCacheGenerationRef.current
       const startedAt = window.performance.now()
+      const markReady = (
+        image: HTMLImageElement,
+        url: string,
+        onReady?: () => void,
+      ) => {
+        if (
+          playerScanVisualCacheGenerationRef.current !== cacheGeneration ||
+          !isPreviewVisualInActiveRetainedWindow(
+            request.key,
+            playerScanRetainedWindowRef.current,
+          )
+        ) {
+          onReady?.()
+          return
+        }
+
+        markScanPreviewFrameReady(image, url, onReady)
+      }
       const loadPromise = loadScanPreviewVisual(
         request,
         apiBase,
-        markScanPreviewFrameReady,
+        markReady,
       )
         .then((visual) => {
           if (request.kind === 'sprite') {
@@ -613,7 +640,13 @@ function TvApp() {
             )
           }
 
-          if (playerScanVisualCacheGenerationRef.current === cacheGeneration) {
+          if (
+            playerScanVisualCacheGenerationRef.current === cacheGeneration &&
+            isPreviewVisualInActiveRetainedWindow(
+              visual.key,
+              playerScanRetainedWindowRef.current,
+            )
+          ) {
             cacheScanPreviewVisual(request, visual)
           }
 
@@ -643,25 +676,29 @@ function TvApp() {
         playerScanSheetTransferBytesRef.current,
         playerScanSheetBandwidthBytesPerSecondRef.current,
       )
-      const firstRetainedSheet = Math.max(
-        currentSheetIndex - retainedRadius,
-        0,
-      )
-      const lastRetainedSheet = Math.min(
-        currentSheetIndex + retainedRadius,
-        getScanPreviewSheetIndex(duration),
-      )
+      const retainedWindow = {
+        firstSheetIndex: Math.max(
+          currentSheetIndex - retainedRadius,
+          0,
+        ),
+        itemId: item.id,
+        lastSheetIndex: Math.min(
+          currentSheetIndex + retainedRadius,
+          getScanPreviewSheetIndex(duration),
+        ),
+        version,
+      }
+
+      playerScanRetainedWindowRef.current = retainedWindow
+
+      for (const key of playerScanVisualPromisesRef.current.keys()) {
+        if (!isPreviewVisualInRetainedWindow(key, retainedWindow)) {
+          playerScanVisualPromisesRef.current.delete(key)
+        }
+      }
 
       for (const key of playerScanVisualCacheRef.current.keys()) {
-        if (
-          !isPreviewVisualInRetainedWindow(
-            key,
-            item,
-            version,
-            firstRetainedSheet,
-            lastRetainedSheet,
-          )
-        ) {
+        if (!isPreviewVisualInRetainedWindow(key, retainedWindow)) {
           playerScanVisualCacheRef.current.delete(key)
         }
       }
@@ -878,6 +915,7 @@ function TvApp() {
       loadedFrameUrls.clear()
       preloadImages.clear()
       playerScanPreloadKeyRef.current = ''
+      playerScanRetainedWindowRef.current = null
       playerScanSheetTransferBytesRef.current = scanPreviewFallbackSheetTransferBytes
       visualCache.clear()
       visualPromises.clear()
@@ -933,6 +971,7 @@ function TvApp() {
     if (!playerItem) {
       playerScanPreloadImagesRef.current.clear()
       playerScanPreloadKeyRef.current = ''
+      playerScanRetainedWindowRef.current = null
       return
     }
 
@@ -2382,6 +2421,7 @@ function TvApp() {
     playerScanLoadedFrameUrlsRef.current.clear()
     playerScanPreloadImagesRef.current.clear()
     playerScanPreloadKeyRef.current = ''
+    playerScanRetainedWindowRef.current = null
     playerScanSheetTransferBytesRef.current = scanPreviewFallbackSheetTransferBytes
     playerScanVisualCacheRef.current.clear()
     playerScanVisualPromisesRef.current.clear()
@@ -2551,6 +2591,12 @@ function TvApp() {
     if (!playerItem) {
       return
     }
+
+    prunePlaybackScanCache(
+      playerItem,
+      getScanPreviewSheetIndex(preview.position),
+      duration,
+    )
 
     const requests = [
       getScanPreviewVisualRequest(playerItem, preview, apiBase),
@@ -2896,12 +2942,15 @@ function TvApp() {
 
     if (playerItem && !playerScanPreviewRef.current) {
       primePlaybackScanCache(playerItem, position, duration)
-      primeShortSeekPreviewCache(
-        playerItem,
-        position,
-        duration,
-        shortSeekDirection,
-      )
+
+      if (shortSeekDirection !== undefined) {
+        primeShortSeekPreviewCache(
+          playerItem,
+          position,
+          duration,
+          shortSeekDirection,
+        )
+      }
     }
   }
 
@@ -4750,22 +4799,32 @@ function getScanPreviewVisualImageUrl(visual: ScanPreviewVisual) {
   return visual.kind === 'image' ? visual.url : visual.sheetUrl
 }
 
+function isPreviewVisualInActiveRetainedWindow(
+  key: string,
+  retainedWindow: ScanPreviewRetainedWindow | null,
+) {
+  return Boolean(
+    retainedWindow &&
+      isPreviewVisualInRetainedWindow(key, retainedWindow),
+  )
+}
+
 function isPreviewVisualInRetainedWindow(
   key: string,
-  item: MediaItem,
-  version: string,
-  firstRetainedSheet: number,
-  lastRetainedSheet: number,
+  retainedWindow: ScanPreviewRetainedWindow,
 ) {
   const url = getScanPreviewVisualUrlFromKey(key)
 
-  if (!isPreviewUrlForMediaItem(url, item, version)) {
+  if (!isPreviewUrlForRetainedWindow(url, retainedWindow)) {
     return false
   }
 
   const sheetIndex = getScanPreviewSheetIndex(getPreviewUrlFramePosition(url))
 
-  return sheetIndex >= firstRetainedSheet && sheetIndex <= lastRetainedSheet
+  return (
+    sheetIndex >= retainedWindow.firstSheetIndex &&
+    sheetIndex <= retainedWindow.lastSheetIndex
+  )
 }
 
 function getScanPreviewVisualUrlFromKey(key: string) {
@@ -4774,18 +4833,17 @@ function getScanPreviewVisualUrlFromKey(key: string) {
   return separatorIndex >= 0 ? key.slice(separatorIndex + 1) : key
 }
 
-function isPreviewUrlForMediaItem(
+function isPreviewUrlForRetainedWindow(
   url: string,
-  item: MediaItem,
-  version: string,
+  retainedWindow: ScanPreviewRetainedWindow,
 ) {
   try {
     const parsedUrl = new URL(url, window.location.origin)
 
     return (
       parsedUrl.pathname.includes(
-        `/api/media/${encodeURIComponent(item.id)}/`,
-      ) && parsedUrl.searchParams.get('v') === version
+        `/api/media/${encodeURIComponent(retainedWindow.itemId)}/`,
+      ) && parsedUrl.searchParams.get('v') === retainedWindow.version
     )
   } catch {
     return false
