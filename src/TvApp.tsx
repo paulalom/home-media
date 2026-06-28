@@ -286,6 +286,8 @@ type AvPlayPlaybackSnapshot = ActivePlaybackSnapshot & {
 type MyHomeMediaServerWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
+    debug?: boolean
+    tvDebug?: boolean
   }
   HOME_MEDIA_SCAN_CACHE_STATS?: ScanPreviewCacheStats
   webapis?: {
@@ -326,7 +328,7 @@ const libraryConnectionPollIntervalMs = 5000
 const libraryConnectionPollTimeoutMs = 4500
 const libraryRequestTimeoutMs = 15000
 const maxRowItems = 28
-const playerHudHideDelayMs = 1000
+const playerHudHideDelayMs = 3000
 const playerNativeStartupTimeoutMs = 12000
 const playerSeekStepSeconds = 5
 const playerShortSeekPreviewHoldMs = 250
@@ -432,6 +434,7 @@ function TvApp() {
   const [actionMenu, setActionMenu] = useState<ActionMenuState | null>(null)
   const [actionMenuIndex, setActionMenuIndex] = useState(0)
   const [apiBase] = useState(readInitialApiBase)
+  const [tvDebugMode] = useState(readInitialTvDebugMode)
   const [canLoadArtwork, setCanLoadArtwork] = useState(false)
   const [clientProfile] = useState(readClientDeviceProfile)
   const [detailState, setDetailState] = useState<DetailState | null>(null)
@@ -2116,7 +2119,7 @@ function TvApp() {
       updatePlayerClockFromValues(snapshot.duration, snapshot.position)
     }
 
-    showPlayerHud()
+    showPlayerHud(true)
   }
 
   function togglePlayer() {
@@ -3101,7 +3104,7 @@ function TvApp() {
       playerClock.position,
       playerClock.duration,
     )
-    const playerDebugStats = playerBlackoutVisible
+    const playerDebugStats = tvDebugMode && playerBlackoutVisible
       ? scanCacheStats ?? getFallbackScanPreviewCacheStats(playerItem)
       : null
 
@@ -4235,6 +4238,27 @@ function readInitialApiBase() {
   } catch {
     return ''
   }
+}
+
+function readInitialTvDebugMode() {
+  try {
+    const params = new URLSearchParams(window.location.search)
+    const queryDebugMode = params.get('debug') ?? params.get('tvDebug')
+
+    if (queryDebugMode !== null) {
+      return isEnabledConfigFlag(queryDebugMode)
+    }
+
+    const runtimeConfig = (window as MyHomeMediaServerWindow).HOME_MEDIA_CONFIG
+
+    return Boolean(runtimeConfig?.tvDebug ?? runtimeConfig?.debug)
+  } catch {
+    return false
+  }
+}
+
+function isEnabledConfigFlag(value: string) {
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase())
 }
 
 function normalizeApiBase(value: string | null | undefined) {
