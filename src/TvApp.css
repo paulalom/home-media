@@ -713,6 +713,7 @@ button {
   background: #050607;
   display: grid;
   height: 100vh;
+  isolation: isolate;
   overflow: hidden;
   place-items: center;
   position: relative;
@@ -720,14 +721,22 @@ button {
 
 .tv-player {
   background: #000000;
+  display: block;
   height: 100vh;
+  inset: 0;
+  position: absolute;
   width: 100vw;
+  z-index: 0;
 }
 
 .tv-avplay-stage {
   background: #000000;
+  display: block;
   height: 100vh;
+  inset: 0;
+  position: absolute;
   width: 100vw;
+  z-index: 0;
 }
 
 .tv-player::-webkit-media-controls,
@@ -738,9 +747,13 @@ button {
 
 .tv-player-blackout {
   background: rgb(0 0 0 / 90%);
+  height: 100vh;
   inset: 0;
   pointer-events: none;
-  position: absolute;
+  position: fixed;
+  transform: translateZ(0);
+  width: 100vw;
+  will-change: opacity;
   z-index: 4;
 }
 

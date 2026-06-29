@@ -336,6 +336,7 @@ const libraryConnectionPollTimeoutMs = 4500
 const libraryRequestTimeoutMs = 15000
 const maxRowItems = 28
 const playerHudHideDelayMs = 3000
+const playerLongPauseSurfaceRecoveryMs = 30 * 60 * 1000
 const playerNativeStartupTimeoutMs = 12000
 const playerSeekStepSeconds = 5
 const playerShortSeekPreviewHoldMs = 250
@@ -465,6 +466,9 @@ function TvApp() {
   const [playerBlackoutVisible, setPlayerBlackoutVisible] = useState(false)
   const [playerEpisodeSwitchTargetId, setPlayerEpisodeSwitchTargetId] =
     useState<string | null>(null)
+  const [htmlPlayerShouldAutoPlay, setHtmlPlayerShouldAutoPlay] =
+    useState(true)
+  const [htmlPlayerSurfaceVersion, setHtmlPlayerSurfaceVersion] = useState(0)
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const [playerStatus, setPlayerStatus] = useState<string | null>(null)
@@ -489,6 +493,7 @@ function TvApp() {
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
   const pendingHtmlResumePositionRef = useRef(0)
+  const pendingHtmlResumeShouldPlayRef = useRef(true)
   const avPlayPlaybackRef = useRef<AvPlayPlaybackSnapshot>({
     duration: 0,
     ended: false,
@@ -528,6 +533,7 @@ function TvApp() {
     Map<string, Promise<ScanPreviewVisual>>
   >(new Map())
   const playerScanWasPlayingRef = useRef(false)
+  const playerPausedAtRef = useRef<number | null>(null)
   const playerShortSeekPreviewLoadTokenRef = useRef(0)
   const playerShortSeekPreviewTimeoutRef = useRef<number | null>(null)
   const playerShortSeekWarmKeyRef = useRef('')
@@ -1488,6 +1494,10 @@ function TvApp() {
   }
 
   function handlePlayerAction(action: RemoteAction, event: KeyboardEvent) {
+    if (recoverLongPausedPlayerSurface(action)) {
+      return
+    }
+
     if (action === 'down') {
       if (!playerScanPreviewRef.current) {
         showPlayerBlackout()
@@ -1798,6 +1808,115 @@ function TvApp() {
     setPlayerEpisodeSwitchTargetId(null)
   }
 
+  function markPlayerPaused(pausedAt = getCurrentTimestamp()) {
+    if (playerPausedAtRef.current === null) {
+      playerPausedAtRef.current = pausedAt
+    }
+  }
+
+  function markPlayerActive() {
+    playerPausedAtRef.current = null
+  }
+
+  function recoverLongPausedPlayerSurface(action: RemoteAction) {
+    const snapshot = readActivePlaybackSnapshot()
+
+    if (!snapshot || !snapshot.paused || snapshot.ended) {
+      return false
+    }
+
+    const pausedAt = playerPausedAtRef.current
+
+    if (
+      pausedAt === null ||
+      getCurrentTimestamp() - pausedAt < playerLongPauseSurfaceRecoveryMs
+    ) {
+      return false
+    }
+
+    if (playerEngine === 'avplay') {
+      refreshAvPlayPausedSurface(snapshot)
+      return false
+    }
+
+    const shouldPlayAfterRefresh =
+      action === 'enter' ||
+      action === 'play' ||
+      action === 'playPause'
+
+    refreshHtmlPlayerSurface(snapshot, shouldPlayAfterRefresh)
+
+    return shouldPlayAfterRefresh
+  }
+
+  function refreshHtmlPlayerSurface(
+    snapshot: ActivePlaybackSnapshot,
+    shouldPlayAfterRefresh: boolean,
+  ) {
+    pendingHtmlResumePositionRef.current = snapshot.position
+    pendingHtmlResumeShouldPlayRef.current = shouldPlayAfterRefresh
+    setHtmlPlayerShouldAutoPlay(shouldPlayAfterRefresh)
+    setHtmlPlayerSurfaceVersion((currentVersion) => currentVersion + 1)
+    playerPausedAtRef.current = shouldPlayAfterRefresh
+      ? null
+      : getCurrentTimestamp()
+  }
+
+  function refreshAvPlayPausedSurface(snapshot: ActivePlaybackSnapshot) {
+    const avPlay = getAvPlay()
+
+    if (!avPlay || playerEngine !== 'avplay') {
+      return
+    }
+
+    try {
+      setAvPlayDisplayRect(avPlay)
+    } catch {
+      return
+    }
+
+    if (!avPlay.seekTo || snapshot.position <= 0) {
+      playerPausedAtRef.current = getCurrentTimestamp()
+      return
+    }
+
+    try {
+      avPlay.seekTo(Math.round(snapshot.position * 1000), () => {
+        try {
+          avPlay.pause()
+        } catch {
+          // The seek may leave AVPlay paused already.
+        }
+      })
+      avPlayPlaybackRef.current = {
+        ...avPlayPlaybackRef.current,
+        paused: true,
+        position: snapshot.position,
+      }
+      updatePlayerClockFromValues(snapshot.duration, snapshot.position)
+    } catch {
+      // A display-rect refresh still helps even when this AVPlay state rejects seek.
+    }
+
+    playerPausedAtRef.current = getCurrentTimestamp()
+  }
+
+  function refreshVisiblePlayerSurface() {
+    if (playerEngine === 'avplay') {
+      const avPlay = getAvPlay()
+
+      if (avPlay) {
+        try {
+          setAvPlayDisplayRect(avPlay)
+        } catch {
+          // AVPlay may reject display updates while it is transitioning states.
+        }
+      }
+    }
+
+    recoverLongPausedPlayerSurface('up')
+  }
+
   function getAvPlay() {
     return (window as MyHomeMediaServerWindow).webapis?.avplay ?? null
   }
@@ -1825,6 +1944,7 @@ function TvApp() {
     const avPlay = getAvPlay()
 
     clearAvPlayProgressInterval()
+    markPlayerActive()
 
     if (avPlayPlaybackRef.current.itemId) {
       avPlayPlaybackRef.current = {
@@ -1972,6 +2092,7 @@ function TvApp() {
           ended: false,
           paused: false,
         }
+        markPlayerActive()
         setPlayerStatus('AVPlay native direct play')
         startAvPlayProgressInterval(item)
         showPlayerHud(true)
@@ -2081,6 +2202,8 @@ function TvApp() {
     clearPlayerStartupTimeout()
     stopAvPlayPlayback()
     pendingHtmlResumePositionRef.current = resumePosition
+    pendingHtmlResumeShouldPlayRef.current = true
+    setHtmlPlayerShouldAutoPlay(true)
     setPlayerStatus(`${reason}; switching to transcode`)
     setPlaybackStrategyById((currentStrategies) => ({
       ...currentStrategies,
@@ -2109,6 +2232,9 @@ function TvApp() {
     clearScanPreviewImages()
     clearPlayerHudTimeout()
     clearPlayerStartupTimeout()
+    pendingHtmlResumeShouldPlayRef.current = true
+    setHtmlPlayerShouldAutoPlay(true)
+    markPlayerActive()
     setPlayerClock({
       duration: 0,
       position: 0,
@@ -2137,6 +2263,9 @@ function TvApp() {
     clearPlayerHudTimeout()
     clearPlayerStartupTimeout()
     hidePlayerBlackout()
+    markPlayerActive()
+    pendingHtmlResumeShouldPlayRef.current = true
+    setHtmlPlayerShouldAutoPlay(true)
     setPlayerStatus(null)
     setPlayerItem(null)
   }
@@ -2795,6 +2924,7 @@ function TvApp() {
           ended: false,
           paused: false,
         }
+        markPlayerActive()
         startAvPlayProgressInterval(playerItem)
       } catch (error) {
         fallbackPlayerToTranscode(playerItem, getErrorMessage(error))
@@ -2802,6 +2932,8 @@ function TvApp() {
       return
     }
 
+    setHtmlPlayerShouldAutoPlay(true)
+    pendingHtmlResumeShouldPlayRef.current = true
     void playerRef.current?.play()
   }
 
@@ -2819,13 +2951,23 @@ function TvApp() {
           ...avPlayPlaybackRef.current,
           paused: true,
         }
+        markPlayerPaused()
       } catch {
         // Pause can fail if AVPlay is still preparing.
       }
       return
     }
 
-    playerRef.current?.pause()
+    const player = playerRef.current
+
+    if (!player) {
+      return
+    }
+
+    player.pause()
+    markPlayerPaused()
+    setHtmlPlayerShouldAutoPlay(false)
+    pendingHtmlResumeShouldPlayRef.current = false
   }
 
   function seekActivePlayback(position: number) {
@@ -2903,6 +3045,7 @@ function TvApp() {
   ) {
     const video = event.currentTarget
     const pendingResumePosition = pendingHtmlResumePositionRef.current
+    const shouldResumePlayback = pendingHtmlResumeShouldPlayRef.current
     const resumePosition = getResumePosition(
       playbackHistoryRef.current[item.id] ?? null,
       video.duration,
@@ -2913,6 +3056,7 @@ function TvApp() {
         : resumePosition
 
     pendingHtmlResumePositionRef.current = 0
+    pendingHtmlResumeShouldPlayRef.current = true
 
     if (targetResumePosition > 0) {
       video.currentTime = targetResumePosition
@@ -2920,6 +3064,15 @@ function TvApp() {
 
     updatePlayerClock(video)
     showPlayerHud()
+
+    if (!shouldResumePlayback) {
+      video.pause()
+      markPlayerPaused()
+      setHtmlPlayerShouldAutoPlay(false)
+      return
+    }
+
+    setHtmlPlayerShouldAutoPlay(true)
     void video.play()
   }
 
@@ -3050,6 +3203,7 @@ function TvApp() {
   useEffect(() => {
     function refreshVisibleApp() {
       registerSamsungRemoteKeys()
+      refreshVisiblePlayerSurface()
       setIsAppVisible(true)
       setIsLoading(true)
       setResumeRefreshKey((currentKey) => currentKey + 1)
@@ -3076,11 +3230,13 @@ function TvApp() {
     document.addEventListener('visibilitychange', handleVisibilityChange)
     window.addEventListener('focus', refreshVisibleApp)
     window.addEventListener('pageshow', refreshVisibleApp)
+    window.addEventListener('resize', refreshVisiblePlayerSurface)
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       window.removeEventListener('focus', refreshVisibleApp)
       window.removeEventListener('pageshow', refreshVisibleApp)
+      window.removeEventListener('resize', refreshVisiblePlayerSurface)
     }
   })
 
@@ -3171,9 +3327,9 @@ function TvApp() {
       <main className="tv-player-shell">
         {playerEngine === 'html' ? (
           <video
-            autoPlay
+            autoPlay={htmlPlayerShouldAutoPlay}
             className="tv-player"
-            key={`${playerItem.id}:${playerPlaybackStrategy}`}
+            key={`${playerItem.id}:${playerPlaybackStrategy}:${htmlPlayerSurfaceVersion}`}
             onCanPlay={() => {
               setPlayerStatus(
                 getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
@@ -3184,6 +3340,7 @@ function TvApp() {
               clearScanPreview()
               clearPlayerHudTimeout()
               hidePlayerBlackout()
+              markPlayerActive()
               updatePlayerClock(event.currentTarget)
               recordPlayback(playerItem, event.currentTarget, true)
               setPlayerStatus(null)
@@ -3207,17 +3364,23 @@ function TvApp() {
             }}
             onLoadedMetadata={(event) => handleLoadedMetadata(playerItem, event)}
             onPause={(event) => {
+              markPlayerPaused()
+              setHtmlPlayerShouldAutoPlay(false)
               updatePlayerClock(event.currentTarget)
               showPlayerHud()
               recordPlayback(playerItem, event.currentTarget, true)
             }}
             onPlay={(event) => {
+              markPlayerActive()
+              setHtmlPlayerShouldAutoPlay(true)
               hidePlayerBlackout()
               updatePlayerClock(event.currentTarget)
               showPlayerHud(true)
             }}
             onPlaying={(event) => {
               clearPlayerStartupTimeout()
+              markPlayerActive()
+              setHtmlPlayerShouldAutoPlay(true)
               hidePlayerBlackout()
               updatePlayerClock(event.currentTarget)
               setPlayerStatus(
