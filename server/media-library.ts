@@ -232,6 +232,14 @@ type PlaybackActivityLease = {
   state: Exclude<PlaybackActivityState, 'closed'>
 }
 
+type TvDiagnosticEntry = {
+  clientId: string
+  event: unknown
+  receivedAt: string
+  sequence: number | null
+  sessionId: string
+}
+
 type PreviewFrameQuality = keyof typeof PREVIEW_FRAME_SETTINGS
 
 type PreviewCacheWarmMode = 'background' | 'foreground'
@@ -343,6 +351,7 @@ const DEFAULT_MEDIA_ROOT = 'F:/media'
 const DEFAULT_FILE_SHARE_DIRECTORY_NAME = 'Desktop'
 const ARTWORK_CACHE_DIRECTORY_NAME = 'My Home Media Server'
 const PREVIEW_FRAME_CACHE_DIRECTORY_NAME = 'preview-frames'
+const TV_DIAGNOSTICS_FILE_NAME = 'tv-diagnostics.json'
 const TRANSCODE_CACHE_DIRECTORY_NAME = 'encoded-videos'
 const VIDEO_EXTENSIONS = new Set([
   '.avi',
@@ -414,6 +423,11 @@ const PLAYBACK_ACTIVITY_CLEANUP_INTERVAL_MS = 15_000
 const PLAYBACK_ACTIVITY_POWER_REFRESH_SECONDS = 30
 const PLAYBACK_ACTIVITY_MAX_CLIENT_ID_LENGTH = 128
 const PLAYBACK_ACTIVITY_MAX_MEDIA_ID_LENGTH = 2048
+const TV_DIAGNOSTICS_MAX_BATCH_EVENTS = 40
+const TV_DIAGNOSTICS_MAX_ENTRIES = 600
+const TV_DIAGNOSTICS_MAX_OBJECT_KEYS = 80
+const TV_DIAGNOSTICS_MAX_STRING_LENGTH = 800
+const TV_DIAGNOSTICS_MAX_VALUE_DEPTH = 5
 
 const MIME_BY_EXTENSION = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -497,6 +511,8 @@ let playbackActivityCleanupTimer: NodeJS.Timeout | null = null
 let systemAwakeProcess: ChildProcess | null = null
 let systemAwakeRestartTimer: NodeJS.Timeout | null = null
 let systemAwakeStartErrorLogged = false
+const tvDiagnosticsEntries: TvDiagnosticEntry[] = []
+let tvDiagnosticsWritePromise = Promise.resolve()
 const previewFrameFetches = new Map<string, Promise<string>>()
 const transcodeCacheEncodes = new Map<string, Promise<string>>()
 
@@ -546,6 +562,20 @@ export function getPreviewFrameCacheRoot() {
         '.my-home-media-server',
         PREVIEW_FRAME_CACHE_DIRECTORY_NAME,
       )
+}
+
+export function getTvDiagnosticsLogPath() {
+  const configuredPath = process.env.HOME_MEDIA_TV_DIAGNOSTICS_PATH?.trim()
+
+  if (configuredPath) {
+    return resolve(configuredPath)
+  }
+
+  const localAppData = process.env.LOCALAPPDATA?.trim()
+
+  return localAppData
+    ? resolve(localAppData, ARTWORK_CACHE_DIRECTORY_NAME, TV_DIAGNOSTICS_FILE_NAME)
+    : resolve(homedir(), '.my-home-media-server', TV_DIAGNOSTICS_FILE_NAME)
 }
 
 export function getTranscodeCacheRoot() {
@@ -738,6 +768,7 @@ export async function handleMediaApi(
     url.pathname === '/api/playback' ||
     url.pathname === '/api/playback-activity' ||
     url.pathname === '/api/preview-cache' ||
+    url.pathname === '/api/tv-diagnostics' ||
     url.pathname === '/api/transcode-cache' ||
     /^\/api\/files\/[^/]+\/download$/.test(url.pathname) ||
     /^\/api\/playback\/[^/]+$/.test(url.pathname) ||
@@ -770,6 +801,39 @@ export async function handleMediaApi(
     }
 
     sendMethodNotAllowed(res, ['GET', 'POST'])
+    return true
+  }
+
+  if (url.pathname === '/api/tv-diagnostics') {
+    if (req.method === 'GET') {
+      sendJson(res, getTvDiagnosticsStatus())
+      return true
+    }
+
+    if (req.method === 'POST') {
+      try {
+        const entries = normalizeTvDiagnosticEntries(await readJsonBody(req))
+        await addTvDiagnosticEntries(entries)
+        sendJson(res, getTvDiagnosticsStatus())
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    if (req.method === 'DELETE') {
+      try {
+        await clearTvDiagnosticEntries()
+        sendJson(res, getTvDiagnosticsStatus())
+      } catch (error) {
+        sendError(res, getErrorStatusCode(error), getErrorMessage(error))
+      }
+
+      return true
+    }
+
+    sendMethodNotAllowed(res, ['DELETE', 'GET', 'POST'])
     return true
   }
 
@@ -3167,6 +3231,153 @@ function getFfprobeExecutable() {
   }
 
   return 'ffprobe'
+}
+
+function getTvDiagnosticsStatus() {
+  return {
+    entries: tvDiagnosticsEntries,
+    entryCount: tvDiagnosticsEntries.length,
+    logPath: getTvDiagnosticsLogPath(),
+    maxEntries: TV_DIAGNOSTICS_MAX_ENTRIES,
+    updatedAt:
+      tvDiagnosticsEntries[tvDiagnosticsEntries.length - 1]?.receivedAt ?? null,
+  }
+}
+
+function normalizeTvDiagnosticEntries(value: unknown): TvDiagnosticEntry[] {
+  const batch = isRecord(value) ? value : {}
+  const rawEvents = Array.isArray(batch.events) ? batch.events : [value]
+  const batchClientId = getTvDiagnosticString(batch.clientId, 128)
+  const batchSessionId = getTvDiagnosticString(batch.sessionId, 128)
+
+  return rawEvents
+    .slice(-TV_DIAGNOSTICS_MAX_BATCH_EVENTS)
+    .map((eventValue): TvDiagnosticEntry => {
+      const eventRecord = isRecord(eventValue) ? eventValue : {}
+      const rawSequence = eventRecord.sequence
+      const sequence =
+        typeof rawSequence === 'number' && Number.isFinite(rawSequence)
+          ? rawSequence
+          : null
+
+      return {
+        clientId:
+          getTvDiagnosticString(eventRecord.clientId, 128) ??
+          batchClientId ??
+          'unknown',
+        event: sanitizeTvDiagnosticValue(eventValue),
+        receivedAt: new Date().toISOString(),
+        sequence,
+        sessionId:
+          getTvDiagnosticString(eventRecord.sessionId, 128) ??
+          batchSessionId ??
+          'unknown',
+      }
+    })
+}
+
+async function addTvDiagnosticEntries(entries: TvDiagnosticEntry[]) {
+  if (!entries.length) {
+    return
+  }
+
+  tvDiagnosticsEntries.push(...entries)
+
+  if (tvDiagnosticsEntries.length > TV_DIAGNOSTICS_MAX_ENTRIES) {
+    tvDiagnosticsEntries.splice(
+      0,
+      tvDiagnosticsEntries.length - TV_DIAGNOSTICS_MAX_ENTRIES,
+    )
+  }
+
+  await saveTvDiagnosticEntries()
+}
+
+async function clearTvDiagnosticEntries() {
+  tvDiagnosticsEntries.splice(0)
+  await saveTvDiagnosticEntries()
+}
+
+async function saveTvDiagnosticEntries() {
+  const writeLog = async () => {
+    const logPath = getTvDiagnosticsLogPath()
+
+    await fs.mkdir(dirname(logPath), { recursive: true })
+    await fs.writeFile(
+      logPath,
+      JSON.stringify(
+        {
+          entries: tvDiagnosticsEntries,
+          entryCount: tvDiagnosticsEntries.length,
+          maxEntries: TV_DIAGNOSTICS_MAX_ENTRIES,
+          updatedAt:
+            tvDiagnosticsEntries[tvDiagnosticsEntries.length - 1]?.receivedAt ??
+            null,
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+  }
+
+  tvDiagnosticsWritePromise = tvDiagnosticsWritePromise.then(writeLog, writeLog)
+
+  await tvDiagnosticsWritePromise
+}
+
+function sanitizeTvDiagnosticValue(value: unknown, depth = 0): unknown {
+  if (depth > TV_DIAGNOSTICS_MAX_VALUE_DEPTH) {
+    return '[depth-limit]'
+  }
+
+  if (
+    value === null ||
+    typeof value === 'boolean' ||
+    typeof value === 'number'
+  ) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  }
+
+  if (typeof value === 'string') {
+    return value.slice(0, TV_DIAGNOSTICS_MAX_STRING_LENGTH)
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, TV_DIAGNOSTICS_MAX_OBJECT_KEYS)
+      .map((item) => sanitizeTvDiagnosticValue(item, depth + 1))
+  }
+
+  if (!isRecord(value)) {
+    return typeof value === 'undefined'
+      ? '[undefined]'
+      : String(value).slice(0, TV_DIAGNOSTICS_MAX_STRING_LENGTH)
+  }
+
+  const sanitized: Record<string, unknown> = {}
+
+  for (const [key, nestedValue] of Object.entries(value).slice(
+    0,
+    TV_DIAGNOSTICS_MAX_OBJECT_KEYS,
+  )) {
+    sanitized[key.slice(0, 120)] = sanitizeTvDiagnosticValue(
+      nestedValue,
+      depth + 1,
+    )
+  }
+
+  return sanitized
+}
+
+function getTvDiagnosticString(value: unknown, maxLength: number) {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+
+  const trimmedValue = value.trim()
+
+  return trimmedValue ? trimmedValue.slice(0, maxLength) : undefined
 }
 
 function normalizeClientProfile(value: unknown): ClientProfile {

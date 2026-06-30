@@ -290,10 +290,28 @@ type AvPlayPlaybackSnapshot = ActivePlaybackSnapshot & {
   itemId: string | null
 }
 
+type TvDiagnosticDetail = Record<string, unknown>
+
+type TvDiagnosticEvent = {
+  appVersion: string
+  at: string
+  clientId: string
+  detail: TvDiagnosticDetail
+  dom: TvDiagnosticDetail
+  env: TvDiagnosticDetail
+  kind: string
+  pageAgeMs: number
+  player: TvDiagnosticDetail
+  sequence: number
+  sessionId: string
+  ui: TvDiagnosticDetail
+}
+
 type MyHomeMediaServerWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
     debug?: boolean
+    tvDiagnostics?: boolean
     tvDebug?: boolean
   }
   HOME_MEDIA_SCAN_CACHE_STATS?: ScanPreviewCacheStats
@@ -362,6 +380,11 @@ const scanPreviewMinimumRetainedSheetsPerDirection = 2
 const scanPreviewSpriteFramesPerSheet = 60
 const scanSpeedMultipliers = [2, 4, 6, 8, 10] as const
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
+const tvDiagnosticsFlushDelayMs = 1200
+const tvDiagnosticsHeartbeatMs = 60_000
+const tvDiagnosticsMaxBatchEvents = 6
+const tvDiagnosticsMaxLocalEvents = 250
+const tvDiagnosticsStorageKey = 'my-home-media-server-tv-diagnostics-v1'
 const tvNativePlaybackContainers = new Set([
   'ASF',
   'AVI',
@@ -442,6 +465,8 @@ function TvApp() {
   const [actionMenu, setActionMenu] = useState<ActionMenuState | null>(null)
   const [actionMenuIndex, setActionMenuIndex] = useState(0)
   const [apiBase] = useState(readInitialApiBase)
+  const [tvDiagnosticsEnabled] = useState(readInitialTvDiagnosticsMode)
+  const [tvDiagnosticsSessionId] = useState(createTvDiagnosticsSessionId)
   const [tvDebugMode] = useState(readInitialTvDebugMode)
   const [canLoadArtwork, setCanLoadArtwork] = useState(false)
   const [clientProfile] = useState(readClientDeviceProfile)
@@ -469,6 +494,7 @@ function TvApp() {
   const [htmlPlayerShouldAutoPlay, setHtmlPlayerShouldAutoPlay] =
     useState(true)
   const [htmlPlayerSurfaceVersion, setHtmlPlayerSurfaceVersion] = useState(0)
+  const [playerShellSurfaceVersion, setPlayerShellSurfaceVersion] = useState(0)
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const [playerStatus, setPlayerStatus] = useState<string | null>(null)
@@ -489,6 +515,13 @@ function TvApp() {
   const playbackActivityClientIdRef = useRef(readPlaybackActivityClientId())
   const playbackActivityCleanupStateRef =
     useRef<PlaybackActivityState>('closed')
+  const recordTvDiagnosticRef = useRef<
+    (
+      kind: string,
+      detail?: TvDiagnosticDetail,
+      options?: { immediate?: boolean },
+    ) => void
+  >(() => undefined)
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
@@ -542,6 +575,11 @@ function TvApp() {
   const rowsRef = useRef<HTMLElement | null>(null)
   const selectedCardRef = useRef<HTMLButtonElement | null>(null)
   const selectedRowRef = useRef<HTMLElement | null>(null)
+  const tvDiagnosticsFlushTimeoutRef = useRef<number | null>(null)
+  const tvDiagnosticsHeartbeatIntervalRef = useRef<number | null>(null)
+  const tvDiagnosticsInFlightRef = useRef(false)
+  const tvDiagnosticsQueueRef = useRef<TvDiagnosticEvent[]>([])
+  const tvDiagnosticsSequenceRef = useRef(0)
   const scanPreviewVisualRequest =
     playerItem && scanPreview
       ? getScanPreviewVisualRequest(playerItem, scanPreview, apiBase)
@@ -1282,6 +1320,258 @@ function TvApp() {
     : 'html'
   const activePlayerItemId = playerItem?.id ?? null
 
+  function recordTvDiagnostic(
+    kind: string,
+    detail: TvDiagnosticDetail = {},
+    options: { immediate?: boolean } = {},
+  ) {
+    if (!tvDiagnosticsEnabled) {
+      return
+    }
+
+    const event = buildTvDiagnosticEvent(kind, detail)
+    const queue = tvDiagnosticsQueueRef.current
+
+    queue.push(event)
+
+    if (queue.length > tvDiagnosticsMaxLocalEvents) {
+      queue.splice(0, queue.length - tvDiagnosticsMaxLocalEvents)
+    }
+
+    persistLocalTvDiagnostics(queue)
+    scheduleTvDiagnosticsFlush(options.immediate ? 0 : tvDiagnosticsFlushDelayMs)
+  }
+
+  function recordTvDiagnosticAfterPaint(
+    kind: string,
+    detail: TvDiagnosticDetail = {},
+    options: { immediate?: boolean } = {},
+  ) {
+    window.setTimeout(() => {
+      if (typeof window.requestAnimationFrame === 'function') {
+        window.requestAnimationFrame(() => {
+          recordTvDiagnostic(kind, detail, options)
+        })
+        return
+      }
+
+      recordTvDiagnostic(kind, detail, options)
+    }, 0)
+  }
+
+  function buildTvDiagnosticEvent(
+    kind: string,
+    detail: TvDiagnosticDetail,
+  ): TvDiagnosticEvent {
+    const snapshot = readActivePlaybackSnapshot()
+    const player = playerRef.current
+    const avPlay = getAvPlay()
+    const sequence = tvDiagnosticsSequenceRef.current + 1
+
+    tvDiagnosticsSequenceRef.current = sequence
+
+    return {
+      appVersion: __HOME_MEDIA_APP_VERSION__,
+      at: new Date().toISOString(),
+      clientId: playbackActivityClientIdRef.current,
+      detail,
+      dom: readTvDomDiagnostics(),
+      env: {
+        apiBase,
+        documentHidden: document.hidden,
+        documentVisibility: document.visibilityState,
+        hasFocus: document.hasFocus(),
+        href: window.location.href,
+        isAppVisible,
+        online: navigator.onLine,
+        userAgent: navigator.userAgent,
+      },
+      kind,
+      pageAgeMs: Math.round(window.performance.now()),
+      player: {
+        activeSnapshot: snapshot,
+        avPlayState: safelyReadString(() => avPlay?.getState?.()),
+        currentSrc: player?.currentSrc,
+        htmlAutoPlay: htmlPlayerShouldAutoPlay,
+        htmlNetworkState: player?.networkState,
+        htmlReadyState: player?.readyState,
+        htmlSurfaceVersion: htmlPlayerSurfaceVersion,
+        item: playerItem
+          ? {
+              browserPlayable: playerItem.browserPlayable,
+              container: playerItem.container,
+              id: playerItem.id,
+              title: getItemDisplayTitle(playerItem),
+            }
+          : null,
+        pausedForMs:
+          playerPausedAtRef.current === null
+            ? null
+            : Math.max(0, getCurrentTimestamp() - playerPausedAtRef.current),
+        playbackStrategy: playerPlaybackStrategy,
+        playerClock,
+        playerEngine,
+        playerShellSurfaceVersion,
+        playerStatus,
+      },
+      sequence,
+      sessionId: tvDiagnosticsSessionId,
+      ui: {
+        actionMenu: actionMenu?.kind ?? null,
+        detailOpen: Boolean(detailTitle),
+        htmlPlayerShouldAutoPlay,
+        playerBlackoutVisible,
+        playerHudVisible,
+        scanPreview,
+        scanPreviewVisibleVisualKind: scanPreviewVisibleVisual?.kind ?? null,
+        shortSeekPreview,
+        shortSeekPreviewVisibleVisualKind:
+          shortSeekPreviewVisibleVisual?.kind ?? null,
+      },
+    }
+  }
+
+  function scheduleTvDiagnosticsFlush(delayMs: number) {
+    if (tvDiagnosticsFlushTimeoutRef.current !== null) {
+      window.clearTimeout(tvDiagnosticsFlushTimeoutRef.current)
+    }
+
+    tvDiagnosticsFlushTimeoutRef.current = window.setTimeout(() => {
+      tvDiagnosticsFlushTimeoutRef.current = null
+      void flushTvDiagnostics()
+    }, delayMs)
+  }
+
+  async function flushTvDiagnostics() {
+    if (!tvDiagnosticsEnabled || tvDiagnosticsInFlightRef.current) {
+      return
+    }
+
+    const events = tvDiagnosticsQueueRef.current.splice(
+      0,
+      tvDiagnosticsMaxBatchEvents,
+    )
+
+    if (!events.length) {
+      return
+    }
+
+    tvDiagnosticsInFlightRef.current = true
+
+    try {
+      const response = await fetch(buildApiUrl('/api/tv-diagnostics', apiBase), {
+        body: JSON.stringify({
+          clientId: playbackActivityClientIdRef.current,
+          events,
+          sessionId: tvDiagnosticsSessionId,
+        }),
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+      })
+
+      if (!response.ok) {
+        throw new Error(`TV diagnostics failed (${response.status})`)
+      }
+
+      persistLocalTvDiagnostics(tvDiagnosticsQueueRef.current)
+    } catch {
+      tvDiagnosticsQueueRef.current.unshift(...events)
+
+      if (tvDiagnosticsQueueRef.current.length > tvDiagnosticsMaxLocalEvents) {
+        tvDiagnosticsQueueRef.current.splice(
+          0,
+          tvDiagnosticsQueueRef.current.length - tvDiagnosticsMaxLocalEvents,
+        )
+      }
+    } finally {
+      tvDiagnosticsInFlightRef.current = false
+
+      if (tvDiagnosticsQueueRef.current.length > 0) {
+        scheduleTvDiagnosticsFlush(tvDiagnosticsFlushDelayMs)
+      }
+    }
+  }
+
+  function flushTvDiagnosticsBeacon() {
+    if (!tvDiagnosticsEnabled || tvDiagnosticsQueueRef.current.length === 0) {
+      return
+    }
+
+    const events = tvDiagnosticsQueueRef.current.splice(
+      0,
+      tvDiagnosticsMaxBatchEvents,
+    )
+    const body = JSON.stringify({
+      clientId: playbackActivityClientIdRef.current,
+      events,
+      sessionId: tvDiagnosticsSessionId,
+    })
+
+    const beaconQueued = navigator.sendBeacon
+      ? navigator.sendBeacon(buildApiUrl('/api/tv-diagnostics', apiBase), body)
+      : false
+
+    if (!beaconQueued) {
+      void fetch(buildApiUrl('/api/tv-diagnostics', apiBase), {
+        body,
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        keepalive: true,
+        method: 'POST',
+      }).catch(() => undefined)
+    }
+
+    persistLocalTvDiagnostics(tvDiagnosticsQueueRef.current)
+  }
+
+  useEffect(() => {
+    recordTvDiagnosticRef.current = recordTvDiagnostic
+  })
+
+  useEffect(() => {
+    if (!tvDiagnosticsEnabled) {
+      return
+    }
+
+    recordTvDiagnosticRef.current('app-start', {}, { immediate: true })
+
+    tvDiagnosticsHeartbeatIntervalRef.current = window.setInterval(() => {
+      recordTvDiagnosticRef.current('heartbeat')
+    }, tvDiagnosticsHeartbeatMs)
+
+    const flushOnPageHide = () => {
+      recordTvDiagnosticRef.current('pagehide', {}, { immediate: true })
+      flushTvDiagnosticsBeacon()
+    }
+
+    window.addEventListener('pagehide', flushOnPageHide)
+    window.addEventListener('beforeunload', flushOnPageHide)
+
+    return () => {
+      window.removeEventListener('pagehide', flushOnPageHide)
+      window.removeEventListener('beforeunload', flushOnPageHide)
+
+      if (tvDiagnosticsHeartbeatIntervalRef.current !== null) {
+        window.clearInterval(tvDiagnosticsHeartbeatIntervalRef.current)
+        tvDiagnosticsHeartbeatIntervalRef.current = null
+      }
+
+      if (tvDiagnosticsFlushTimeoutRef.current !== null) {
+        window.clearTimeout(tvDiagnosticsFlushTimeoutRef.current)
+        tvDiagnosticsFlushTimeoutRef.current = null
+      }
+
+      flushTvDiagnosticsBeacon()
+    }
+    // Diagnostics reads live refs and current render state through recordTvDiagnosticRef.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tvDiagnosticsEnabled])
+
   useEffect(() => {
     if (!activePlayerItemId) {
       return
@@ -1494,6 +1784,15 @@ function TvApp() {
   }
 
   function handlePlayerAction(action: RemoteAction, event: KeyboardEvent) {
+    if (!event.repeat || (action !== 'left' && action !== 'right')) {
+      recordTvDiagnostic('player-action', {
+        action,
+        key: event.key,
+        keyCode: event.keyCode,
+        repeat: event.repeat,
+      })
+    }
+
     if (recoverLongPausedPlayerSurface(action)) {
       return
     }
@@ -1798,14 +2097,20 @@ function TvApp() {
   }
 
   function showPlayerBlackout() {
+    recordTvDiagnostic('blackout-show-request')
     setPlayerBlackoutVisible(true)
     setPlayerEpisodeSwitchTargetId(null)
     showPlayerHud()
+    recordTvDiagnosticAfterPaint('blackout-show-after-paint', {}, {
+      immediate: true,
+    })
   }
 
   function hidePlayerBlackout() {
+    recordTvDiagnostic('blackout-hide-request')
     setPlayerBlackoutVisible(false)
     setPlayerEpisodeSwitchTargetId(null)
+    recordTvDiagnosticAfterPaint('blackout-hide-after-paint')
   }
 
   function markPlayerPaused(pausedAt = getCurrentTimestamp()) {
@@ -1835,6 +2140,12 @@ function TvApp() {
     }
 
     if (playerEngine === 'avplay') {
+      recordTvDiagnostic('long-pause-recover-avplay', {
+        action,
+        snapshot,
+      }, {
+        immediate: true,
+      })
       refreshAvPlayPausedSurface(snapshot)
       return false
     }
@@ -1844,6 +2155,13 @@ function TvApp() {
       action === 'play' ||
       action === 'playPause'
 
+    recordTvDiagnostic('long-pause-recover-html', {
+      action,
+      shouldPlayAfterRefresh,
+      snapshot,
+    }, {
+      immediate: true,
+    })
     refreshHtmlPlayerSurface(snapshot, shouldPlayAfterRefresh)
 
     return shouldPlayAfterRefresh
@@ -1857,6 +2175,7 @@ function TvApp() {
     pendingHtmlResumeShouldPlayRef.current = shouldPlayAfterRefresh
     setHtmlPlayerShouldAutoPlay(shouldPlayAfterRefresh)
     setHtmlPlayerSurfaceVersion((currentVersion) => currentVersion + 1)
+    setPlayerShellSurfaceVersion((currentVersion) => currentVersion + 1)
     playerPausedAtRef.current = shouldPlayAfterRefresh
       ? null
       : getCurrentTimestamp()
@@ -1871,6 +2190,7 @@ function TvApp() {
 
     try {
       setAvPlayDisplayRect(avPlay)
+      setPlayerShellSurfaceVersion((currentVersion) => currentVersion + 1)
     } catch {
       return
     }
@@ -1908,8 +2228,10 @@ function TvApp() {
       if (avPlay) {
         try {
           setAvPlayDisplayRect(avPlay)
+          recordTvDiagnostic('avplay-display-rect-refresh')
         } catch {
           // AVPlay may reject display updates while it is transitioning states.
+          recordTvDiagnostic('avplay-display-rect-refresh-failed')
         }
       }
     }
@@ -2271,11 +2593,13 @@ function TvApp() {
   }
 
   function playPlayer() {
+    recordTvDiagnostic('play-request', {}, { immediate: true })
     playActivePlayback()
     showPlayerHud(true)
   }
 
   function pausePlayer() {
+    recordTvDiagnostic('pause-request', {}, { immediate: true })
     pauseActivePlayback()
     showPlayerHud(false)
   }
@@ -2392,6 +2716,11 @@ function TvApp() {
     direction: ScanDirection,
     advanceStage: boolean,
   ) {
+    recordTvDiagnostic('scan-begin-request', {
+      advanceStage,
+      direction,
+    })
+
     const snapshot = readActivePlaybackSnapshot()
 
     if (!snapshot) {
@@ -2443,6 +2772,11 @@ function TvApp() {
     }
 
     showPlayerHud()
+    recordTvDiagnosticAfterPaint('scan-begin-after-paint', {
+      nextPreview,
+    }, {
+      immediate: true,
+    })
   }
 
   function commitScanPreview() {
@@ -2452,6 +2786,13 @@ function TvApp() {
     if (!snapshot || !preview) {
       return false
     }
+
+    recordTvDiagnostic('scan-commit-request', {
+      preview,
+      snapshot,
+    }, {
+      immediate: true,
+    })
 
     const duration = snapshot.duration
     const nextPosition = getScanPreviewCommitPosition(preview, duration)
@@ -2487,6 +2828,8 @@ function TvApp() {
       return false
     }
 
+    recordTvDiagnostic('scan-pause-request', { preview })
+
     playerScanWasPlayingRef.current = false
     setScanPreviewState({
       ...preview,
@@ -2504,6 +2847,8 @@ function TvApp() {
     if (!preview) {
       return false
     }
+
+    recordTvDiagnostic('scan-resume-request', { preview })
 
     if (!preview.scanning) {
       setScanPreviewState({
@@ -2524,6 +2869,11 @@ function TvApp() {
       return
     }
 
+    recordTvDiagnostic('scan-cancel-request', {
+      preview: playerScanPreviewRef.current,
+    }, {
+      immediate: true,
+    })
     clearScanPreview()
     showPlayerHud()
   }
@@ -2935,6 +3285,7 @@ function TvApp() {
     setHtmlPlayerShouldAutoPlay(true)
     pendingHtmlResumeShouldPlayRef.current = true
     void playerRef.current?.play()
+    recordTvDiagnosticAfterPaint('html-play-after-paint')
   }
 
   function pauseActivePlayback() {
@@ -2968,6 +3319,7 @@ function TvApp() {
     markPlayerPaused()
     setHtmlPlayerShouldAutoPlay(false)
     pendingHtmlResumeShouldPlayRef.current = false
+    recordTvDiagnosticAfterPaint('html-pause-after-paint')
   }
 
   function seekActivePlayback(position: number) {
@@ -3248,6 +3600,14 @@ function TvApp() {
         return
       }
 
+      if (!event.repeat) {
+        recordTvDiagnostic('remote-keydown', {
+          action,
+          key: event.key,
+          keyCode: event.keyCode,
+        })
+      }
+
       if (
         action === 'back' &&
         !actionMenu &&
@@ -3292,6 +3652,11 @@ function TvApp() {
       }
 
       event.preventDefault()
+      recordTvDiagnostic('remote-keyup', {
+        action,
+        key: event.key,
+        keyCode: event.keyCode,
+      })
       handlePlayerScanKeyUp(action === 'right' ? 1 : -1)
     }
 
@@ -3324,7 +3689,10 @@ function TvApp() {
       : null
 
     return (
-      <main className="tv-player-shell">
+      <main
+        className="tv-player-shell"
+        key={`player-shell:${playerItem.id}:${playerPlaybackStrategy}:${playerShellSurfaceVersion}`}
+      >
         {playerEngine === 'html' ? (
           <video
             autoPlay={htmlPlayerShouldAutoPlay}
@@ -3369,6 +3737,7 @@ function TvApp() {
               updatePlayerClock(event.currentTarget)
               showPlayerHud()
               recordPlayback(playerItem, event.currentTarget, true)
+              recordTvDiagnostic('html-video-pause', {}, { immediate: true })
             }}
             onPlay={(event) => {
               markPlayerActive()
@@ -3376,6 +3745,7 @@ function TvApp() {
               hidePlayerBlackout()
               updatePlayerClock(event.currentTarget)
               showPlayerHud(true)
+              recordTvDiagnostic('html-video-play')
             }}
             onPlaying={(event) => {
               clearPlayerStartupTimeout()
@@ -3387,6 +3757,7 @@ function TvApp() {
                 getPlaybackStatusLabel(playerItem, playerPlaybackStrategy),
               )
               showPlayerHud(true)
+              recordTvDiagnostic('html-video-playing')
             }}
             onSeeked={(event) => {
               updatePlayerClock(event.currentTarget)
@@ -4477,6 +4848,37 @@ function readInitialTvDebugMode() {
   } catch {
     return false
   }
+}
+
+function readInitialTvDiagnosticsMode() {
+  try {
+    const params = new URLSearchParams(window.location.search)
+    const queryDiagnosticsMode =
+      params.get('diagnostics') ?? params.get('tvDiagnostics')
+
+    if (queryDiagnosticsMode !== null) {
+      return isEnabledConfigFlag(queryDiagnosticsMode)
+    }
+
+    const runtimeConfig = (window as MyHomeMediaServerWindow).HOME_MEDIA_CONFIG
+
+    if (typeof runtimeConfig?.tvDiagnostics === 'boolean') {
+      return runtimeConfig.tvDiagnostics
+    }
+
+    return true
+  } catch {
+    return true
+  }
+}
+
+function createTvDiagnosticsSessionId() {
+  return [
+    'tv',
+    __HOME_MEDIA_APP_VERSION__,
+    Date.now().toString(36),
+    Math.random().toString(36).slice(2, 10),
+  ].join('-')
 }
 
 function isEnabledConfigFlag(value: string) {
@@ -5947,6 +6349,129 @@ function formatMillisecondsAsSeconds(milliseconds: number) {
   const seconds = milliseconds / 1000
 
   return Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1)
+}
+
+function persistLocalTvDiagnostics(events: TvDiagnosticEvent[]) {
+  try {
+    window.localStorage.setItem(
+      tvDiagnosticsStorageKey,
+      JSON.stringify({
+        events: events.slice(-tvDiagnosticsMaxLocalEvents),
+        maxEvents: tvDiagnosticsMaxLocalEvents,
+        updatedAt: new Date().toISOString(),
+      }),
+    )
+  } catch {
+    // Local storage is a best-effort fallback; the server-side capped log is primary.
+  }
+}
+
+function readTvDomDiagnostics(): TvDiagnosticDetail {
+  return {
+    activeElement: describeElement(document.activeElement),
+    elements: {
+      avplay: getElementDiagnostic('.tv-avplay-stage'),
+      blackout: getElementDiagnostic('.tv-player-blackout'),
+      episodeSwitch: getElementDiagnostic('.tv-player-episode-switch'),
+      player: getElementDiagnostic('.tv-player'),
+      playerInfo: getElementDiagnostic('.tv-player-info'),
+      playerShell: getElementDiagnostic('.tv-player-shell'),
+      scanThumbnail: getElementDiagnostic('.tv-scan-thumbnail'),
+      shortSeekPreview: getElementDiagnostic('.tv-short-seek-preview'),
+    },
+    hitTests: {
+      center: getElementsFromPointDiagnostic(
+        window.innerWidth / 2,
+        window.innerHeight / 2,
+      ),
+      lowerLeft: getElementsFromPointDiagnostic(48, window.innerHeight - 48),
+      lowerMiddle: getElementsFromPointDiagnostic(
+        window.innerWidth / 2,
+        window.innerHeight - 48,
+      ),
+    },
+    viewport: {
+      devicePixelRatio: window.devicePixelRatio,
+      height: window.innerHeight,
+      screenHeight: window.screen.height,
+      screenWidth: window.screen.width,
+      width: window.innerWidth,
+    },
+  }
+}
+
+function getElementDiagnostic(selector: string): TvDiagnosticDetail {
+  const element = document.querySelector(selector)
+
+  if (!element) {
+    return {
+      exists: false,
+      selector,
+    }
+  }
+
+  const rect = element.getBoundingClientRect()
+  const style = window.getComputedStyle(element)
+
+  return {
+    className: getElementClassName(element),
+    exists: true,
+    id: element.id || null,
+    rect: {
+      bottom: roundDiagnosticNumber(rect.bottom),
+      height: roundDiagnosticNumber(rect.height),
+      left: roundDiagnosticNumber(rect.left),
+      right: roundDiagnosticNumber(rect.right),
+      top: roundDiagnosticNumber(rect.top),
+      width: roundDiagnosticNumber(rect.width),
+    },
+    selector,
+    style: {
+      backgroundColor: style.backgroundColor,
+      display: style.display,
+      opacity: style.opacity,
+      pointerEvents: style.pointerEvents,
+      position: style.position,
+      transform: style.transform,
+      visibility: style.visibility,
+      zIndex: style.zIndex,
+    },
+    tagName: element.tagName,
+    textLength: element.textContent?.length ?? 0,
+  }
+}
+
+function getElementsFromPointDiagnostic(x: number, y: number) {
+  try {
+    return document
+      .elementsFromPoint(x, y)
+      .slice(0, 8)
+      .map(describeElement)
+  } catch {
+    return []
+  }
+}
+
+function describeElement(element: Element | null): TvDiagnosticDetail | null {
+  if (!element) {
+    return null
+  }
+
+  return {
+    className: getElementClassName(element),
+    id: element.id || null,
+    tagName: element.tagName,
+  }
+}
+
+function getElementClassName(element: Element) {
+  return typeof element.className === 'string'
+    ? element.className.slice(0, 200)
+    : ''
+}
+
+function roundDiagnosticNumber(value: number) {
+  return Number.isFinite(value) ? Math.round(value * 100) / 100 : 0
 }
 
 function getLibraryRequestDiagnosticLines(error: unknown, apiBase: string) {
