@@ -203,6 +203,10 @@ type ActionMenuState =
       title: TvTitle
     }
   | {
+      kind: 'settings'
+      preventSleepWhilePaused: boolean
+    }
+  | {
       kind: 'title'
       title: TvTitle
     }
@@ -216,6 +220,7 @@ type ActionMenuEntry = {
     | 'mark-previous-watched'
     | 'mark-unwatched'
     | 'mark-watched'
+    | 'toggle-prevent-sleep-while-paused'
   label: string
 }
 
@@ -319,6 +324,7 @@ type MyHomeMediaServerWindow = Window & {
   HOME_MEDIA_CONFIG?: {
     apiBase?: string
     debug?: boolean
+    preventSleepWhilePaused?: boolean
     tvDiagnostics?: boolean
     tvDebug?: boolean
   }
@@ -370,6 +376,8 @@ type MyHomeMediaServerWindow = Window & {
 
 const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
+const preventSleepWhilePausedStorageKey =
+  'my-home-media-server-tv-prevent-sleep-while-paused-v1'
 const clientProfileRequestTimeoutMs = 5000
 const libraryArtworkRowLoadRadius = 2
 const libraryConnectionPollIntervalMs = 5000
@@ -524,6 +532,9 @@ function TvApp() {
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
     readLocalPlaybackHistory,
   )
+  const [preventSleepWhilePaused, setPreventSleepWhilePaused] = useState(
+    readInitialPreventSleepWhilePaused,
+  )
   const [playerClock, setPlayerClock] = useState<PlayerClock>({
     duration: 0,
     position: 0,
@@ -537,6 +548,7 @@ function TvApp() {
   const [playerShellSurfaceVersion, setPlayerShellSurfaceVersion] = useState(0)
   const [playerHudVisible, setPlayerHudVisible] = useState(true)
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
+  const [playerPlaybackPaused, setPlayerPlaybackPaused] = useState(true)
   const [playerStatus, setPlayerStatus] = useState<string | null>(null)
   const [playbackStrategyById, setPlaybackStrategyById] = useState<
     Record<string, PlaybackStrategy>
@@ -607,6 +619,7 @@ function TvApp() {
   >(new Map())
   const playerScanWasPlayingRef = useRef(false)
   const playerPausedAtRef = useRef<number | null>(null)
+  const playerPlaybackPausedRef = useRef(true)
   const playerShortSeekPreviewLoadTokenRef = useRef(0)
   const playerShortSeekPreviewTimeoutRef = useRef<number | null>(null)
   const playerShortSeekWarmKeyRef = useRef('')
@@ -1367,6 +1380,10 @@ function TvApp() {
     ? getPlaybackEngine(playerItem, playerPlaybackStrategy)
     : 'html'
   const activePlayerItemId = playerItem?.id ?? null
+  const shouldKeepTvPlayerAwake = Boolean(
+    activePlayerItemId &&
+      (!playerPlaybackPaused || preventSleepWhilePaused),
+  )
 
   function recordTvDiagnostic(
     kind: string,
@@ -1687,21 +1704,34 @@ function TvApp() {
 
   useEffect(() => {
     if (!activePlayerItemId) {
+      recordTvDiagnosticRef.current(
+        'tv-keep-awake-disable',
+        setTvPlayerKeepAwake(false, {
+          preventSleepWhilePaused,
+          reason: 'player-closed',
+        }),
+      )
       return
     }
 
     recordTvDiagnosticRef.current(
-      'tv-keep-awake-enable',
-      setTvPlayerKeepAwake(true),
+      shouldKeepTvPlayerAwake ? 'tv-keep-awake-enable' : 'tv-keep-awake-disable',
+      setTvPlayerKeepAwake(shouldKeepTvPlayerAwake, {
+        playerPlaybackPaused,
+        preventSleepWhilePaused,
+        reason: shouldKeepTvPlayerAwake
+          ? playerPlaybackPaused
+            ? 'paused-setting-enabled'
+            : 'playing'
+          : 'paused-setting-disabled',
+      }),
     )
-
-    return () => {
-      recordTvDiagnosticRef.current(
-        'tv-keep-awake-disable',
-        setTvPlayerKeepAwake(false),
-      )
-    }
-  }, [activePlayerItemId])
+  }, [
+    activePlayerItemId,
+    playerPlaybackPaused,
+    preventSleepWhilePaused,
+    shouldKeepTvPlayerAwake,
+  ])
 
   useEffect(() => {
     if (!activePlayerItemId) {
@@ -2119,6 +2149,14 @@ function TvApp() {
     setActionMenuIndex(0)
   }
 
+  function openSettingsMenu() {
+    setActionMenu({
+      kind: 'settings',
+      preventSleepWhilePaused,
+    })
+    setActionMenuIndex(0)
+  }
+
   function closeActionMenu() {
     setActionMenu(null)
     setActionMenuIndex(0)
@@ -2134,6 +2172,27 @@ function TvApp() {
     menu: ActionMenuState,
     entryId: ActionMenuEntry['id'],
   ) {
+    if (menu.kind === 'settings') {
+      if (entryId === 'toggle-prevent-sleep-while-paused') {
+        setPreventSleepWhilePaused((currentValue) => {
+          const nextValue = !currentValue
+
+          writePreventSleepWhilePaused(nextValue)
+          recordTvDiagnostic('tv-setting-change', {
+            setting: 'preventSleepWhilePaused',
+            value: nextValue,
+          }, {
+            immediate: true,
+          })
+
+          return nextValue
+        })
+      }
+
+      closeActionMenu()
+      return
+    }
+
     if (entryId === 'mark-all-watched') {
       markItemsWatched(menu.title.items)
       closeActionMenu()
@@ -2227,6 +2286,38 @@ function TvApp() {
     }
   }
 
+  function renderActionMenu() {
+    if (!actionMenu) {
+      return null
+    }
+
+    return (
+      <section className="tv-action-menu" aria-modal="true" role="dialog">
+        <div className="tv-action-menu-panel">
+          <p>{getActionMenuEyebrow(actionMenu)}</p>
+          <h2>{getActionMenuTitle(actionMenu)}</h2>
+          <div className="tv-action-menu-list">
+            {actionMenuEntries.map((entry, entryIndex) => (
+              <button
+                className={
+                  safeActionMenuIndex === entryIndex
+                    ? 'tv-action-menu-item selected'
+                    : 'tv-action-menu-item'
+                }
+                disabled={entry.disabled}
+                key={entry.id}
+                onClick={() => applyActionMenuEntry(actionMenu, entry.id)}
+                type="button"
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
+    )
+  }
+
   function showPlayerBlackout() {
     if (playerBlackoutVisible && playerEpisodeSwitchTargetId === null) {
       return
@@ -2253,13 +2344,27 @@ function TvApp() {
     recordTvDiagnosticAfterPaint('blackout-hide-after-paint')
   }
 
+  function setPlayerPlaybackPausedDeferred(paused: boolean) {
+    if (playerPlaybackPausedRef.current === paused) {
+      return
+    }
+
+    playerPlaybackPausedRef.current = paused
+    window.setTimeout(() => {
+      setPlayerPlaybackPaused(paused)
+    }, 0)
+  }
+
   function markPlayerPaused(pausedAt = getCurrentTimestamp()) {
+    setPlayerPlaybackPausedDeferred(true)
+
     if (playerPausedAtRef.current === null) {
       playerPausedAtRef.current = pausedAt
     }
   }
 
   function markPlayerActive() {
+    setPlayerPlaybackPausedDeferred(false)
     playerPausedAtRef.current = null
   }
 
@@ -4504,31 +4609,7 @@ function TvApp() {
           </div>
         </section>
 
-        {actionMenu ? (
-          <section className="tv-action-menu" aria-modal="true" role="dialog">
-            <div className="tv-action-menu-panel">
-              <p>{getActionMenuEyebrow(actionMenu)}</p>
-              <h2>{getActionMenuTitle(actionMenu)}</h2>
-              <div className="tv-action-menu-list">
-                {actionMenuEntries.map((entry, entryIndex) => (
-                  <button
-                    className={
-                      safeActionMenuIndex === entryIndex
-                        ? 'tv-action-menu-item selected'
-                        : 'tv-action-menu-item'
-                    }
-                    disabled={entry.disabled}
-                    key={entry.id}
-                    onClick={() => applyActionMenuEntry(actionMenu, entry.id)}
-                    type="button"
-                  >
-                    {entry.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </section>
-        ) : null}
+        {renderActionMenu()}
       </main>
     )
   }
@@ -4544,6 +4625,15 @@ function TvApp() {
           <span>{library ? `${library.summary.totalVideos} files` : '...'}</span>
           <strong>{getClientDeviceLabel(clientProfile)}</strong>
           <small>{apiBase || 'Local package'}</small>
+          <button
+            aria-label="TV playback settings"
+            className="tv-icon-button tv-topbar-settings-button"
+            onClick={openSettingsMenu}
+            title="TV playback settings"
+            type="button"
+          >
+            <Settings size={20} />
+          </button>
         </div>
       </header>
 
@@ -4694,6 +4784,8 @@ function TvApp() {
       ) : (
         <section className="tv-loading">No titles found</section>
       )}
+
+      {renderActionMenu()}
     </main>
   )
 }
@@ -5225,6 +5317,47 @@ function readInitialTvDiagnosticsMode() {
     return true
   } catch {
     return true
+  }
+}
+
+function readInitialPreventSleepWhilePaused() {
+  try {
+    const params = new URLSearchParams(window.location.search)
+    const queryValue =
+      params.get('preventSleepWhilePaused') ?? params.get('keepAwakePaused')
+
+    if (queryValue !== null) {
+      return isEnabledConfigFlag(queryValue)
+    }
+
+    const runtimeConfig = (window as MyHomeMediaServerWindow).HOME_MEDIA_CONFIG
+
+    if (typeof runtimeConfig?.preventSleepWhilePaused === 'boolean') {
+      return runtimeConfig.preventSleepWhilePaused
+    }
+
+    const storedValue = window.localStorage.getItem(
+      preventSleepWhilePausedStorageKey,
+    )
+
+    if (storedValue !== null) {
+      return storedValue === '1'
+    }
+
+    return true
+  } catch {
+    return true
+  }
+}
+
+function writePreventSleepWhilePaused(value: boolean) {
+  try {
+    window.localStorage.setItem(
+      preventSleepWhilePausedStorageKey,
+      value ? '1' : '0',
+    )
+  } catch {
+    // Local settings should not interfere with playback.
   }
 }
 
@@ -6398,6 +6531,17 @@ function getPlayerEpisodeSwitchButtonClassName(isSelected: boolean) {
 }
 
 function getActionMenuEntries(menu: ActionMenuState): ActionMenuEntry[] {
+  if (menu.kind === 'settings') {
+    return [
+      {
+        id: 'toggle-prevent-sleep-while-paused',
+        label: `Prevent sleep while paused: ${
+          menu.preventSleepWhilePaused ? 'On' : 'Off'
+        }`,
+      },
+    ]
+  }
+
   if (menu.kind === 'title') {
     return menu.title.kind === 'show'
       ? [
@@ -6447,6 +6591,10 @@ function getActionMenuEntries(menu: ActionMenuState): ActionMenuEntry[] {
 }
 
 function getActionMenuEyebrow(menu: ActionMenuState) {
+  if (menu.kind === 'settings') {
+    return 'TV settings'
+  }
+
   if (menu.kind === 'title') {
     return menu.title.kind === 'show' ? 'Show actions' : 'Movie actions'
   }
@@ -6457,6 +6605,10 @@ function getActionMenuEyebrow(menu: ActionMenuState) {
 }
 
 function getActionMenuTitle(menu: ActionMenuState) {
+  if (menu.kind === 'settings') {
+    return 'Playback'
+  }
+
   if (menu.kind === 'title') {
     return menu.title.title
   }
@@ -7035,20 +7187,24 @@ function pulseTvUiCompositor(recoveryIndex: number) {
   }
 }
 
-function setTvPlayerKeepAwake(keepAwake: boolean): TvDiagnosticDetail {
+function setTvPlayerKeepAwake(
+  keepAwake: boolean,
+  detail: TvDiagnosticDetail = {},
+): TvDiagnosticDetail {
   const tvWindow = window as MyHomeMediaServerWindow
   const appcommon = tvWindow.webapis?.appcommon
   const screenSaverState = keepAwake
     ? appcommon?.AppCommonScreenSaverState?.SCREEN_SAVER_OFF
     : appcommon?.AppCommonScreenSaverState?.SCREEN_SAVER_ON
-  const detail: TvDiagnosticDetail = {
+  const nextDetail: TvDiagnosticDetail = {
+    ...detail,
     keepAwake,
   }
 
   if (!appcommon?.setScreenSaver) {
-    detail.screenSaver = 'unavailable'
+    nextDetail.screenSaver = 'unavailable'
   } else if (screenSaverState === undefined) {
-    detail.screenSaver = 'missing-state'
+    nextDetail.screenSaver = 'missing-state'
   } else {
     try {
       appcommon.setScreenSaver(
@@ -7056,18 +7212,18 @@ function setTvPlayerKeepAwake(keepAwake: boolean): TvDiagnosticDetail {
         () => undefined,
         () => undefined,
       )
-      detail.screenSaver = 'ok'
-      detail.screenSaverState = String(screenSaverState)
+      nextDetail.screenSaver = 'ok'
+      nextDetail.screenSaverState = String(screenSaverState)
     } catch (error) {
-      detail.screenSaver = 'failed'
-      detail.screenSaverError = getErrorMessage(error)
+      nextDetail.screenSaver = 'failed'
+      nextDetail.screenSaverError = getErrorMessage(error)
     }
   }
 
   const power = tvWindow.tizen?.power
 
   if (!power?.request && !power?.release) {
-    detail.power = 'unavailable'
+    nextDetail.power = 'unavailable'
   } else {
     try {
       if (keepAwake) {
@@ -7076,14 +7232,14 @@ function setTvPlayerKeepAwake(keepAwake: boolean): TvDiagnosticDetail {
         power.release?.('SCREEN')
       }
 
-      detail.power = 'ok'
+      nextDetail.power = 'ok'
     } catch (error) {
-      detail.power = 'failed'
-      detail.powerError = getErrorMessage(error)
+      nextDetail.power = 'failed'
+      nextDetail.powerError = getErrorMessage(error)
     }
   }
 
-  return detail
+  return nextDetail
 }
 
 function getErrorMessage(error: unknown) {

@@ -97,6 +97,12 @@ button {
   justify-items: end;
 }
 
+.tv-topbar-settings-button {
+  height: 44px;
+  margin-top: 4px;
+  width: 44px;
+}
+
 .tv-status strong {
   color: var(--tv-text-soft);
   font-size: 0.9rem;
