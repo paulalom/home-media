@@ -9,9 +9,9 @@ import {
 import {
   AlertCircle,
   ArrowUp,
+  Check,
   ChevronRight,
   Clapperboard,
-  Database,
   Download,
   File as FileIcon,
   FileVideo,
@@ -29,6 +29,7 @@ import {
   Trash2,
   Tv,
   Video,
+  X,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -39,6 +40,7 @@ import {
   type PlaybackActivityState,
 } from './playback-activity'
 import {
+  deletePlaybackRecord,
   fetchPlaybackHistory,
   mergePlaybackHistories,
   readLocalPlaybackHistory,
@@ -51,6 +53,7 @@ import './App.css'
 
 type MediaCategory = 'movie' | 'show' | 'other'
 type MediaViewMode = 'Home' | 'Movies' | 'TV Shows'
+type QuickJumpDigit = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 type ViewMode = MediaViewMode | 'Files'
 
 type MediaItem = {
@@ -224,6 +227,7 @@ type MyHomeMediaServerWindow = Window & {
 const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
 const autoEncodeStorageKey = 'my-home-media-server-auto-encode-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
+const quickJumpLastDigit = 9
 const viewModes: MediaViewMode[] = ['Home', 'Movies', 'TV Shows']
 
 async function fetchLibrary(
@@ -2028,19 +2032,32 @@ function getFileDirectoryLabel(fileShare: FileShareResponse | null) {
 }
 
 function handleMediaKey(event: KeyboardEvent, player: HTMLVideoElement | null) {
-  if (event.key !== 'MediaPlayPause' || !player) {
+  if (!player) {
     return false
   }
 
-  event.preventDefault()
+  const quickJumpDigit = getQuickJumpDigit(event)
 
-  if (player.paused) {
-    void player.play()
-  } else {
-    player.pause()
+  if (quickJumpDigit !== null && !isTextInput(document.activeElement)) {
+    event.preventDefault()
+    seekPlayerToQuickJump(player, quickJumpDigit)
+
+    return true
   }
 
-  return true
+  if (event.key === 'MediaPlayPause') {
+    event.preventDefault()
+
+    if (player.paused) {
+      void player.play()
+    } else {
+      player.pause()
+    }
+
+    return true
+  }
+
+  return false
 }
 
 function handleBackKey(
@@ -2106,6 +2123,57 @@ function isTextInput(element: Element | null) {
     element instanceof HTMLInputElement ||
     element instanceof HTMLTextAreaElement
   )
+}
+
+function getQuickJumpDigit(event: KeyboardEvent): QuickJumpDigit | null {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+    return null
+  }
+
+  if (/^\d$/.test(event.key)) {
+    return toQuickJumpDigit(Number(event.key))
+  }
+
+  const keyCode = event.keyCode || event.which
+
+  if (keyCode >= 48 && keyCode <= 57) {
+    return toQuickJumpDigit(keyCode - 48)
+  }
+
+  if (keyCode >= 96 && keyCode <= 105) {
+    return toQuickJumpDigit(keyCode - 96)
+  }
+
+  return null
+}
+
+function toQuickJumpDigit(value: number): QuickJumpDigit | null {
+  return Number.isInteger(value) && value >= 0 && value <= quickJumpLastDigit
+    ? (value as QuickJumpDigit)
+    : null
+}
+
+function seekPlayerToQuickJump(
+  player: HTMLVideoElement,
+  digit: QuickJumpDigit,
+) {
+  const duration = getFiniteVideoDuration(player)
+
+  if (!duration) {
+    return
+  }
+
+  player.currentTime = getQuickJumpPosition(digit, duration)
+}
+
+function getQuickJumpPosition(digit: QuickJumpDigit, duration: number) {
+  return (duration * digit) / quickJumpLastDigit
+}
+
+function getFiniteVideoDuration(video: HTMLVideoElement) {
+  return Number.isFinite(video.duration) && video.duration > 0
+    ? video.duration
+    : 0
 }
 
 function getResumePosition(record: PlaybackRecord | null, duration: number) {

@@ -31,6 +31,7 @@ import {
 declare const __HOME_MEDIA_APP_VERSION__: string
 
 type MediaCategory = 'movie' | 'show' | 'other'
+type QuickJumpDigit = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 type LibraryConnectionPhase = 'idle' | 'loading' | 'polling'
 type LibraryErrorState = {
   diagnostics: string[]
@@ -362,6 +363,19 @@ const maxRowItems = 28
 const playerHudHideDelayMs = 3000
 const playerLongPauseSurfaceRecoveryMs = 30 * 60 * 1000
 const playerNativeStartupTimeoutMs = 12000
+const playerQuickJumpLastDigit = 9
+const playerQuickJumpRemoteKeys = [
+  '0',
+  '1',
+  '2',
+  '3',
+  '4',
+  '5',
+  '6',
+  '7',
+  '8',
+  '9',
+]
 const playerSeekStepSeconds = 5
 const playerShortSeekPreviewHoldMs = 250
 const playerShortSeekPreviewBackgroundClicks = 5
@@ -3479,6 +3493,24 @@ function TvApp() {
     showPlayerHud(!snapshot.paused && !snapshot.ended)
   }
 
+  function jumpPlayerToQuickPosition(digit: QuickJumpDigit) {
+    const snapshot = readActivePlaybackSnapshot()
+
+    if (!snapshot || !snapshot.duration) {
+      return
+    }
+
+    const duration = snapshot.duration
+    const nextPosition = getQuickJumpPosition(digit, duration)
+    const seekDirection = nextPosition >= snapshot.position ? 1 : -1
+
+    cancelScanPreview()
+    seekActivePlayback(nextPosition)
+    updatePlayerClockFromValues(duration, nextPosition, seekDirection)
+    showShortSeekPreview(nextPosition, duration)
+    showPlayerHud(!snapshot.paused && !snapshot.ended)
+  }
+
   function readActivePlaybackSnapshot(): ActivePlaybackSnapshot | null {
     if (playerEngine === 'avplay' && avPlayPlaybackRef.current.itemId) {
       return avPlayPlaybackRef.current
@@ -3834,13 +3866,35 @@ function TvApp() {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      const quickJumpDigit = getQuickJumpDigit(event)
       const action = getRemoteAction(event)
+
+      if (!action && (quickJumpDigit === null || !playerItem)) {
+        return
+      }
+
+      const uiRecovery = action
+        ? recoverStalledTvUi(action)
+        : { recovered: false }
+
+      if (quickJumpDigit !== null && playerItem) {
+        event.preventDefault()
+
+        if (!event.repeat) {
+          recordTvDiagnostic('player-quick-jump', {
+            digit: quickJumpDigit,
+            key: event.key,
+            keyCode: event.keyCode,
+          })
+        }
+
+        jumpPlayerToQuickPosition(quickJumpDigit)
+        return
+      }
 
       if (!action) {
         return
       }
-
-      const uiRecovery = recoverStalledTvUi(action)
 
       if (!event.repeat) {
         recordTvDiagnostic('remote-keydown', {
@@ -5019,10 +5073,11 @@ function registerSamsungRemoteKeys() {
   try {
     if (tvInputDevice?.registerKeyBatch) {
       tvInputDevice.registerKeyBatch(samsungMediaKeys)
+      tvInputDevice.registerKeyBatch(playerQuickJumpRemoteKeys)
       return
     }
 
-    for (const key of samsungMediaKeys) {
+    for (const key of [...samsungMediaKeys, ...playerQuickJumpRemoteKeys]) {
       tvInputDevice?.registerKey?.(key)
     }
   } catch {
@@ -6464,6 +6519,42 @@ function getProgressPercent(position: number, duration: number) {
   }
 
   return clamp((position / duration) * 100, 0, 100)
+}
+
+function getQuickJumpDigit(event: KeyboardEvent): QuickJumpDigit | null {
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+    return null
+  }
+
+  if (/^\d$/.test(event.key)) {
+    return toQuickJumpDigit(Number(event.key))
+  }
+
+  const keyCode = event.keyCode || event.which
+
+  if (keyCode >= 48 && keyCode <= 57) {
+    return toQuickJumpDigit(keyCode - 48)
+  }
+
+  if (keyCode >= 96 && keyCode <= 105) {
+    return toQuickJumpDigit(keyCode - 96)
+  }
+
+  return null
+}
+
+function toQuickJumpDigit(value: number): QuickJumpDigit | null {
+  return (
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= playerQuickJumpLastDigit
+  )
+    ? (value as QuickJumpDigit)
+    : null
+}
+
+function getQuickJumpPosition(digit: QuickJumpDigit, duration: number) {
+  return (duration * digit) / playerQuickJumpLastDigit
 }
 
 function getFiniteVideoDuration(video: HTMLVideoElement) {
