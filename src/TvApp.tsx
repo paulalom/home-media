@@ -8,6 +8,7 @@ import {
   type CSSProperties,
   type SyntheticEvent,
 } from 'react'
+import { flushSync } from 'react-dom'
 import { Check, ChevronLeft, ChevronRight, Settings } from 'lucide-react'
 import {
   playbackActivityHeartbeatMs,
@@ -391,6 +392,8 @@ const tvDiagnosticsLocalPersistDelayMs = 5000
 const tvDiagnosticsMaxBatchEvents = 6
 const tvDiagnosticsMaxLocalEvents = 250
 const tvDiagnosticsStorageKey = 'my-home-media-server-tv-diagnostics-v1'
+const tvUiStallRecoveryCooldownMs = 15_000
+const tvUiStallRecoveryMs = tvDiagnosticsHeartbeatMs * 2 + 10_000
 const tvNativePlaybackContainers = new Set([
   'ASF',
   'AVI',
@@ -587,6 +590,12 @@ function TvApp() {
   const tvDiagnosticsLocalPersistTimeoutRef = useRef<number | null>(null)
   const tvDiagnosticsQueueRef = useRef<TvDiagnosticEvent[]>([])
   const tvDiagnosticsSequenceRef = useRef(0)
+  const tvLastClockRenderAtRef = useRef(getCurrentTimestamp())
+  const tvLastClockUpdateAtRef = useRef(getCurrentTimestamp())
+  const tvLastDiagnosticsHeartbeatAtRef = useRef(getCurrentTimestamp())
+  const tvLastRenderAtRef = useRef(getCurrentTimestamp())
+  const tvLastUiRecoveryAtRef = useRef(0)
+  const tvUiRecoveryCountRef = useRef(0)
   const scanPreviewVisualRequest =
     playerItem && scanPreview
       ? getScanPreviewVisualRequest(playerItem, scanPreview, apiBase)
@@ -1453,6 +1462,11 @@ function TvApp() {
 
   function scheduleTvDiagnosticsFlush(delayMs: number) {
     try {
+      if (delayMs <= 0) {
+        flushTvDiagnosticsBeacon()
+        return
+      }
+
       if (tvDiagnosticsFlushTimeoutRef.current !== null) {
         window.clearTimeout(tvDiagnosticsFlushTimeoutRef.current)
       }
@@ -1542,10 +1556,11 @@ function TvApp() {
     }
 
     try {
-      const events = tvDiagnosticsQueueRef.current.splice(
+      const startIndex = Math.max(
         0,
-        tvDiagnosticsMaxBatchEvents,
+        tvDiagnosticsQueueRef.current.length - tvDiagnosticsMaxBatchEvents,
       )
+      const events = tvDiagnosticsQueueRef.current.splice(startIndex)
       const body = JSON.stringify({
         clientId: playbackActivityClientIdRef.current,
         events,
@@ -1569,6 +1584,10 @@ function TvApp() {
       }
 
       scheduleLocalTvDiagnosticsPersist()
+
+      if (tvDiagnosticsQueueRef.current.length > 0) {
+        scheduleTvDiagnosticsFlush(tvDiagnosticsFlushDelayMs)
+      }
     } catch {
       // Pagehide telemetry is best-effort.
     }
@@ -1577,6 +1596,14 @@ function TvApp() {
   useEffect(() => {
     recordTvDiagnosticRef.current = recordTvDiagnostic
   })
+
+  useEffect(() => {
+    tvLastRenderAtRef.current = getCurrentTimestamp()
+  })
+
+  useEffect(() => {
+    tvLastClockRenderAtRef.current = getCurrentTimestamp()
+  }, [playerClock.duration, playerClock.position])
 
   useEffect(() => {
     if (!tvDiagnosticsEnabled) {
@@ -1589,6 +1616,7 @@ function TvApp() {
     })
 
     tvDiagnosticsHeartbeatIntervalRef.current = window.setInterval(() => {
+      tvLastDiagnosticsHeartbeatAtRef.current = getCurrentTimestamp()
       recordTvDiagnosticRef.current('heartbeat')
     }, tvDiagnosticsHeartbeatMs)
 
@@ -2301,6 +2329,155 @@ function TvApp() {
     }
 
     recoverLongPausedPlayerSurface('up')
+  }
+
+  function readTvUiFreshness() {
+    const now = getCurrentTimestamp()
+
+    return {
+      clockRenderStaleMs: Math.max(0, now - tvLastClockRenderAtRef.current),
+      clockUpdateStaleMs: Math.max(0, now - tvLastClockUpdateAtRef.current),
+      diagnosticsHeartbeatStaleMs: tvDiagnosticsEnabled
+        ? Math.max(0, now - tvLastDiagnosticsHeartbeatAtRef.current)
+        : null,
+      renderStaleMs: Math.max(0, now - tvLastRenderAtRef.current),
+    }
+  }
+
+  function recoverStalledTvUi(action: RemoteAction) {
+    if (!playerItem) {
+      return {
+        recovered: false,
+        ...readTvUiFreshness(),
+      }
+    }
+
+    const freshness = readTvUiFreshness()
+    const snapshotBefore = readActivePlaybackSnapshot()
+    const isPlaying = Boolean(
+      snapshotBefore && !snapshotBefore.paused && !snapshotBefore.ended,
+    )
+    const heartbeatStaleMs = freshness.diagnosticsHeartbeatStaleMs ?? 0
+    const isStale =
+      freshness.renderStaleMs >= tvUiStallRecoveryMs ||
+      freshness.clockRenderStaleMs >= tvUiStallRecoveryMs ||
+      heartbeatStaleMs >= tvUiStallRecoveryMs ||
+      (isPlaying && freshness.clockUpdateStaleMs >= tvUiStallRecoveryMs)
+
+    if (!isStale) {
+      return {
+        recovered: false,
+        ...freshness,
+      }
+    }
+
+    const now = getCurrentTimestamp()
+    const sinceLastRecoveryMs = now - tvLastUiRecoveryAtRef.current
+
+    if (
+      tvLastUiRecoveryAtRef.current > 0 &&
+      sinceLastRecoveryMs < tvUiStallRecoveryCooldownMs
+    ) {
+      return {
+        cooldown: true,
+        recovered: false,
+        sinceLastRecoveryMs,
+        ...freshness,
+      }
+    }
+
+    const recoveryIndex = tvUiRecoveryCountRef.current + 1
+    const avPlay = playerEngine === 'avplay' ? getAvPlay() : null
+    const avPlayState = safelyReadString(() => avPlay?.getState?.()) ?? null
+    const liveDuration =
+      playerEngine === 'avplay'
+        ? getAvPlayDuration(avPlay) || snapshotBefore?.duration || 0
+        : snapshotBefore?.duration ?? 0
+    const livePosition =
+      playerEngine === 'avplay'
+        ? getAvPlayCurrentTime(avPlay)
+        : snapshotBefore?.position ?? 0
+    const clampedPosition = clamp(livePosition, 0, liveDuration || livePosition)
+    const liveSnapshot = snapshotBefore
+      ? {
+          ...snapshotBefore,
+          duration: liveDuration,
+          paused:
+            avPlayState === null ? snapshotBefore.paused : avPlayState !== 'PLAYING',
+          position: clampedPosition,
+        }
+      : null
+
+    tvLastUiRecoveryAtRef.current = now
+    tvUiRecoveryCountRef.current = recoveryIndex
+
+    recordTvDiagnostic('ui-stall-recover-request', {
+      action,
+      avPlayState,
+      freshness,
+      liveSnapshot,
+      recoveryIndex,
+      snapshotBefore,
+    }, {
+      immediate: true,
+      includeDom: true,
+    })
+
+    if (playerEngine === 'avplay' && liveSnapshot) {
+      avPlayPlaybackRef.current = {
+        ...avPlayPlaybackRef.current,
+        duration: liveSnapshot.duration,
+        paused: liveSnapshot.paused,
+        position: liveSnapshot.position,
+      }
+    }
+
+    try {
+      if (avPlay) {
+        setAvPlayDisplayRect(avPlay)
+      }
+    } catch {
+      // A stale UI recovery should continue even if AVPlay rejects display updates.
+    }
+
+    const applyRecoveryState = () => {
+      if (liveSnapshot) {
+        tvLastClockUpdateAtRef.current = getCurrentTimestamp()
+        setPlayerClock({
+          duration: liveSnapshot.duration,
+          position: liveSnapshot.position,
+        })
+      }
+
+      setPlayerHudVisible(true)
+
+      if (!playerScanPreviewRef.current) {
+        setPlayerBlackoutVisible(false)
+        setPlayerEpisodeSwitchTargetId(null)
+      }
+
+      setPlayerShellSurfaceVersion((currentVersion) => currentVersion + 1)
+    }
+
+    try {
+      flushSync(applyRecoveryState)
+    } catch {
+      applyRecoveryState()
+    }
+
+    pulseTvUiCompositor(recoveryIndex)
+    recordTvDiagnosticAfterPaint('ui-stall-recover-after-paint', {
+      recoveryIndex,
+    }, {
+      immediate: true,
+      includeDom: true,
+    })
+
+    return {
+      recovered: true,
+      recoveryIndex,
+      ...freshness,
+    }
   }
 
   function getAvPlay() {
@@ -3502,6 +3679,7 @@ function TvApp() {
     position: number,
     shortSeekDirection?: ScanDirection,
   ) {
+    tvLastClockUpdateAtRef.current = getCurrentTimestamp()
     setPlayerClock({
       duration,
       position,
@@ -3662,11 +3840,16 @@ function TvApp() {
         return
       }
 
+      const uiRecovery = recoverStalledTvUi(action)
+
       if (!event.repeat) {
         recordTvDiagnostic('remote-keydown', {
           action,
           key: event.key,
           keyCode: event.keyCode,
+          uiRecovery,
+        }, {
+          immediate: uiRecovery.recovered === true,
         })
       }
 
@@ -6678,6 +6861,31 @@ function truncateDiagnosticValue(value: string) {
 
 function getObjectTypeName(value: object) {
   return Object.prototype.toString.call(value)
+}
+
+function pulseTvUiCompositor(recoveryIndex: number) {
+  try {
+    const pulseValue = String(recoveryIndex)
+    const elements: (HTMLElement | null)[] = [
+      document.documentElement,
+      document.body,
+      document.querySelector<HTMLElement>('.tv-player-shell'),
+      document.querySelector<HTMLElement>('.tv-player-info'),
+    ]
+
+    for (const element of elements) {
+      if (!element) {
+        continue
+      }
+
+      element.dataset.tvUiRecoveryPulse = pulseValue
+      element.style.setProperty('--tv-ui-recovery-pulse', pulseValue)
+    }
+
+    void document.body.offsetHeight
+  } catch {
+    // Compositor nudges are best-effort and must never affect playback.
+  }
 }
 
 function getErrorMessage(error: unknown) {
