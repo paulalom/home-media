@@ -205,17 +205,17 @@ type LibraryCollections = {
   all: LibraryTitle[]
 }
 
+type BrowseSection = {
+  id: 'continue' | 'movies' | 'results' | 'shows'
+  label: string
+  titles: LibraryTitle[]
+}
+
 type NavItem = {
   label: string
   count: string
   icon: LucideIcon
   mode: MediaViewMode
-}
-
-type StatItem = {
-  label: string
-  value: string
-  icon: LucideIcon
 }
 
 type MyHomeMediaServerWindow = Window & {
@@ -228,7 +228,6 @@ const apiBaseStorageKey = 'my-home-media-server-api-base-v1'
 const autoEncodeStorageKey = 'my-home-media-server-auto-encode-v1'
 const legacyApiBaseStorageKey = 'home-media-api-base-v1'
 const quickJumpLastDigit = 9
-const viewModes: MediaViewMode[] = ['Home', 'Movies', 'TV Shows']
 
 async function fetchLibrary(
   apiBase: string,
@@ -386,6 +385,7 @@ function App() {
   const [playbackHistory, setPlaybackHistory] = useState<PlaybackHistory>(
     readLocalPlaybackHistory,
   )
+  const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const [previewCacheActionRunning, setPreviewCacheActionRunning] =
     useState(false)
   const [previewCacheStatus, setPreviewCacheStatus] =
@@ -643,6 +643,9 @@ function App() {
   const selectedPlayback = selectedItem
     ? playbackHistory[selectedItem.id] ?? null
     : null
+  const playerPlayback = playerItem
+    ? playbackHistory[playerItem.id] ?? null
+    : null
 
   useEffect(() => {
     if (!activePlaybackMediaId) {
@@ -698,16 +701,18 @@ function App() {
     activeView === 'Files'
       ? []
       : getTitlesForView(collections, activeView, mediaQuery)
+  const browseSections = useMemo(
+    () =>
+      activeView === 'Files'
+        ? []
+        : buildBrowseSections(collections, activeView, mediaQuery),
+    [activeView, collections, mediaQuery],
+  )
   const visibleFileEntries = filterFileEntries(
     fileShare?.entries ?? [],
     fileQuery,
   )
   const currentError = activeView === 'Files' ? fileError : error
-  const titleOptions =
-    selectedTitle &&
-    !visibleTitles.some((title) => title.id === selectedTitle.id)
-      ? [selectedTitle, ...visibleTitles]
-      : visibleTitles
 
   const navItems: NavItem[] = [
     {
@@ -727,29 +732,6 @@ function App() {
       count: formatNumber(collections.shows.length),
       icon: Tv,
       mode: 'TV Shows',
-    },
-  ]
-
-  const libraryStats: StatItem[] = [
-    {
-      label: 'Indexed titles',
-      value: formatNumber(collections.all.length),
-      icon: Database,
-    },
-    {
-      label: 'Movies',
-      value: formatNumber(collections.movies.length),
-      icon: Video,
-    },
-    {
-      label: 'TV shows',
-      value: formatNumber(collections.shows.length),
-      icon: Tv,
-    },
-    {
-      label: 'Video files',
-      value: formatNumber(library?.summary.totalVideos ?? 0),
-      icon: FileVideo,
     },
   ]
 
@@ -885,14 +867,6 @@ function App() {
     setFileReloadKey((currentKey) => currentKey + 1)
   }
 
-  function selectTitleById(titleId: string) {
-    const nextTitle = titleOptions.find((title) => title.id === titleId)
-
-    if (nextTitle) {
-      selectTitle(nextTitle)
-    }
-  }
-
   function openPlaybackActivity(item: MediaItem) {
     playbackActivityCleanupStateRef.current = 'closed'
     setActivePlaybackMediaId(item.id)
@@ -921,26 +895,108 @@ function App() {
   }
 
   function playSelectedItem() {
-    if (selectedItem) {
-      openPlaybackActivity(selectedItem)
+    startPlayback(selectedItem)
+  }
+
+  function startPlayback(item: MediaItem | null) {
+    if (!item) {
+      return
     }
 
-    void playerRef.current?.play()
+    setSelectedEpisodeId(item.id)
+    setPlayerItem(item)
+    openPlaybackActivity(item)
   }
 
   function fullscreenSelectedItem() {
     const player = playerRef.current
 
-    if (!player || !selectedItem) {
+    if (!player) {
       return
     }
-
-    openPlaybackActivity(selectedItem)
 
     void player
       .requestFullscreen()
       .then(() => player.play())
       .catch(() => player.play())
+  }
+
+  function closePlayer() {
+    if (playerItem && playerRef.current) {
+      recordPlayback(playerItem, playerRef.current, true)
+      closePlaybackActivity(playerItem)
+    }
+
+    setPlayerItem(null)
+  }
+
+  function markItemsWatched(items: MediaItem[]) {
+    if (!items.length) {
+      return
+    }
+
+    const now = getCurrentTimestamp()
+    const records = items.map((item, itemIndex) => {
+      const existingRecord = playbackHistoryRef.current[item.id]
+      const duration =
+        existingRecord?.duration && existingRecord.duration > 0
+          ? existingRecord.duration
+          : 1
+      const record: PlaybackRecord = {
+        completed: true,
+        duration,
+        position: duration,
+        updatedAt: now + itemIndex,
+      }
+
+      return { item, record }
+    })
+
+    setPlaybackHistory((currentHistory) => {
+      const nextHistory = { ...currentHistory }
+
+      for (const { item, record } of records) {
+        nextHistory[item.id] = record
+      }
+
+      return nextHistory
+    })
+
+    for (const { item, record } of records) {
+      void savePlaybackRecord(apiBase, item.id, record).catch(() => undefined)
+    }
+  }
+
+  function markItemsUnwatched(items: MediaItem[]) {
+    if (!items.length) {
+      return
+    }
+
+    setPlaybackHistory((currentHistory) => {
+      const nextHistory = { ...currentHistory }
+
+      for (const item of items) {
+        delete nextHistory[item.id]
+      }
+
+      return nextHistory
+    })
+
+    for (const item of items) {
+      void deletePlaybackRecord(apiBase, item.id).catch(() => undefined)
+    }
+  }
+
+  function markSelectedTitleWatched() {
+    if (selectedTitle) {
+      markItemsWatched(getTitleItems(selectedTitle))
+    }
+  }
+
+  function clearSelectedTitleProgress() {
+    if (selectedTitle) {
+      markItemsUnwatched(getTitleItems(selectedTitle))
+    }
   }
 
   function handleLoadedMetadata(
@@ -1053,23 +1109,84 @@ function App() {
 
   return (
     <main className="app-shell">
-      <aside className="sidebar" aria-label="Primary navigation">
-        <div className="brand-lockup">
-          <div className="brand-mark">
-            <Radio size={24} />
+      {playerItem ? (
+        <section className="browser-player-shell" aria-label="Now playing">
+          <video
+            autoPlay
+            className="browser-player"
+            controls
+            key={playerItem.id}
+            onEnded={(event) => {
+              recordPlayback(playerItem, event.currentTarget, true)
+              endPlaybackActivity(playerItem)
+              setPlayerItem(null)
+            }}
+            onError={() => closePlaybackActivity(playerItem)}
+            onLoadedMetadata={(event) => handleLoadedMetadata(playerItem, event)}
+            onPause={(event) =>
+              recordPlayback(playerItem, event.currentTarget, true)
+            }
+            onPlay={() => openPlaybackActivity(playerItem)}
+            onPlaying={() => openPlaybackActivity(playerItem)}
+            onTimeUpdate={(event) =>
+              recordPlayback(playerItem, event.currentTarget)
+            }
+            preload={playerItem.browserPlayable ? 'auto' : 'metadata'}
+            ref={playerRef}
+            src={getPlaybackStreamUrl(playerItem, apiBase)}
+          />
+          <div className="browser-player-info">
+            <div>
+              <p className="eyebrow">{getPlayerSubtitle(playerItem)}</p>
+              <h2>{getPlayerTitle(playerItem)}</h2>
+              <span>
+                {playerPlayback && !playerPlayback.completed
+                  ? `Resume ${formatDuration(playerPlayback.position)}`
+                  : getMediaContainerLabel(playerItem)}
+              </span>
+            </div>
+            <button
+              className="icon-button"
+              onClick={fullscreenSelectedItem}
+              title="Fullscreen"
+              type="button"
+            >
+              <Maximize2 size={20} />
+            </button>
+            <button
+              className="icon-button"
+              onClick={closePlayer}
+              title="Close player"
+              type="button"
+            >
+              <X size={21} />
+            </button>
           </div>
-          <div>
+        </section>
+      ) : null}
+
+      <header className="app-topbar">
+        <button
+          className="brand-lockup"
+          onClick={() => changeView('Home')}
+          type="button"
+        >
+          <span className="brand-mark">
+            <Radio size={24} />
+          </span>
+          <span>
             <p className="eyebrow">Local server</p>
             <h1>My Home Media Server</h1>
-          </div>
-        </div>
+          </span>
+        </button>
 
-        <nav className="nav-stack">
+        <nav className="nav-stack" aria-label="Library navigation">
           {navItems.map((item) => {
             const Icon = item.icon
 
             return (
               <button
+                aria-pressed={activeView === item.mode}
                 className={
                   activeView === item.mode ? 'nav-item active' : 'nav-item'
                 }
@@ -1084,10 +1201,8 @@ function App() {
               </button>
             )
           })}
-        </nav>
-
-        <div className="utility-nav" aria-label="Utility navigation">
           <button
+            aria-pressed={activeView === 'Files'}
             className={activeView === 'Files' ? 'nav-item active' : 'nav-item'}
             onClick={openFileView}
             title="Files"
@@ -1096,553 +1211,609 @@ function App() {
             <FolderOpen size={18} />
             <span>Files</span>
           </button>
-        </div>
+        </nav>
 
-        <div className="server-card">
-          <div className="server-icon">
-            <Server size={20} />
-          </div>
-          <div>
-            <p className="muted">
-              {activeView === 'Files' ? 'File root' : 'Source'}
-            </p>
-            <strong>
-              {activeView === 'Files'
-                ? fileShare?.summary.root ?? 'Desktop'
-                : library?.summary.root ?? 'F:/media'}
-            </strong>
-          </div>
-          <span className="status-dot" aria-label="Online" />
-        </div>
-      </aside>
-
-      <section className="workspace">
-        <header className="topbar">
+        <div className="topbar-actions">
           <div className="search-box">
             <Search size={18} />
             <input
-              aria-label={activeView === 'Files' ? 'Search files' : 'Search library'}
+              aria-label={
+                activeView === 'Files' ? 'Search files' : 'Search library'
+              }
               onChange={(event) =>
                 activeView === 'Files'
                   ? setFileQuery(event.target.value)
                   : changeMediaQuery(event.target.value)
               }
-              placeholder={activeView === 'Files' ? 'Search files' : 'Search titles'}
+              placeholder={
+                activeView === 'Files' ? 'Search files' : 'Search titles'
+              }
               value={activeView === 'Files' ? fileQuery : mediaQuery}
             />
           </div>
-          <div className="topbar-actions">
+          <button
+            className="icon-button"
+            onClick={() => {
+              setApiBaseDraft(apiBase)
+              setShowSettings((isOpen) => !isOpen)
+            }}
+            title="Server settings"
+            type="button"
+          >
+            <Settings size={19} />
+          </button>
+          {activeView === 'Files' ? (
             <button
-              className="icon-button"
-              onClick={() => {
-                setApiBaseDraft(apiBase)
-                setShowSettings((isOpen) => !isOpen)
-              }}
-              title="Server settings"
+              className="primary-button"
+              disabled={filesLoading}
+              onClick={refreshFileShare}
               type="button"
             >
-              <Settings size={19} />
+              <RefreshCcw size={18} />
+              {filesLoading ? 'Loading' : 'Refresh'}
             </button>
-            {activeView === 'Files' ? (
-              <button
-                className="primary-button"
-                disabled={filesLoading}
-                onClick={refreshFileShare}
-                type="button"
-              >
-                <RefreshCcw size={18} />
-                {filesLoading ? 'Loading' : 'Refresh'}
-              </button>
-            ) : (
-              <button
-                className="primary-button"
-                disabled={scanRunning}
-                onClick={startScan}
-                type="button"
-              >
-                <RefreshCcw size={18} />
-                {scanRunning ? 'Scanning' : 'Scan'}
-              </button>
-            )}
-            {showSettings ? (
-              <form className="server-settings" onSubmit={saveApiSettings}>
-                <label htmlFor="server-url">Server URL</label>
-                <input
-                  id="server-url"
-                  onChange={(event) => setApiBaseDraft(event.target.value)}
-                  placeholder="http://192.168.1.25:23232"
-                  value={apiBaseDraft}
-                />
-                <div className="settings-actions">
-                  <button className="secondary-button" type="submit">
-                    Save
-                  </button>
-                  <button
-                    className="secondary-button subtle"
-                    onClick={() => setApiBaseDraft('')}
-                    type="button"
-                  >
-                    This host
-                  </button>
-                </div>
-                <section
-                  className="settings-section"
-                  aria-label="Encoded video cache"
-                >
-                  <div className="settings-heading">
-                    <span>Encoded video cache</span>
-                    <strong>
-                      {transcodeCacheStatus
-                        ? formatTranscodeCacheState(transcodeCacheStatus)
-                        : 'Loading'}
-                    </strong>
-                  </div>
-                  <label className="settings-toggle">
-                    <input
-                      checked={autoEncodeEnabled}
-                      onChange={(event) =>
-                        setAutoEncodeEnabled(event.target.checked)
-                      }
-                      type="checkbox"
-                    />
-                    <span>Automatically encode unsupported videos</span>
-                  </label>
-                  <p
-                    className="settings-path"
-                    title={transcodeCacheStatus?.cacheRoot}
-                  >
-                    {transcodeCacheStatus?.cacheRoot ?? 'Checking cache folder'}
-                  </p>
-                  <div className="settings-metrics">
-                    <span>
-                      {transcodeCacheStatus?.cacheSizeLabel ?? '0 B'} /{' '}
-                      {formatNumber(transcodeCacheStatus?.cacheFiles ?? 0)} files
-                    </span>
-                    <span>
-                      {formatNumber(
-                        (transcodeCacheStatus?.cachedVideos ?? 0) +
-                          (transcodeCacheStatus?.generatedVideos ?? 0),
-                      )}{' '}
-                      / {formatNumber(transcodeCacheStatus?.totalVideos ?? 0)}{' '}
-                      videos
-                    </span>
-                    <span>
-                      Target: {transcodeCacheStatus?.target ?? 'MP4 H.264/AAC'}
-                    </span>
-                  </div>
-                  {transcodeCacheStatus?.currentTitle ? (
-                    <p className="settings-note">
-                      {transcodeCacheStatus.currentTitle}
-                    </p>
-                  ) : null}
-                  {transcodeCacheStatus?.lastError ? (
-                    <p className="settings-error">
-                      {transcodeCacheStatus.lastError}
-                    </p>
-                  ) : null}
-                  <div className="settings-actions">
-                    <button
-                      className="secondary-button subtle"
-                      disabled={
-                        transcodeCacheActionRunning ||
-                        transcodeCacheStatus?.state === 'clearing'
-                      }
-                      onClick={warmTranscodeCache}
-                      type="button"
-                    >
-                      <RefreshCcw size={16} />
-                      Encode
-                    </button>
-                    <button
-                      className="secondary-button danger"
-                      disabled={transcodeCacheActionRunning}
-                      onClick={removeTranscodeCache}
-                      type="button"
-                    >
-                      <Trash2 size={16} />
-                      Clear
-                    </button>
-                  </div>
-                </section>
-                <section className="settings-section" aria-label="Preview cache">
-                  <div className="settings-heading">
-                    <span>Preview cache</span>
-                    <strong>
-                      {previewCacheStatus
-                        ? formatPreviewCacheState(previewCacheStatus)
-                        : 'Loading'}
-                    </strong>
-                  </div>
-                  <p
-                    className="settings-path"
-                    title={previewCacheStatus?.cacheRoot}
-                  >
-                    {previewCacheStatus?.cacheRoot ?? 'Checking cache folder'}
-                  </p>
-                  <div className="settings-metrics">
-                    <span>
-                      {previewCacheStatus?.cacheSizeLabel ?? '0 B'} /{' '}
-                      {formatNumber(previewCacheStatus?.cacheFiles ?? 0)} files
-                    </span>
-                    <span>
-                      {formatNumber(
-                        (previewCacheStatus?.cachedFrames ?? 0) +
-                          (previewCacheStatus?.generatedFrames ?? 0),
-                      )}{' '}
-                      / {formatNumber(previewCacheStatus?.totalFrames ?? 0)}{' '}
-                      frames
-                    </span>
-                    <span>
-                      {formatNumber(previewCacheStatus?.completedVideos ?? 0)} /{' '}
-                      {formatNumber(previewCacheStatus?.totalVideos ?? 0)} videos
-                    </span>
-                  </div>
-                  {previewCacheStatus?.currentTitle ? (
-                    <p className="settings-note">
-                      {previewCacheStatus.currentTitle}
-                    </p>
-                  ) : null}
-                  {previewCacheStatus?.lastError ? (
-                    <p className="settings-error">
-                      {previewCacheStatus.lastError}
-                    </p>
-                  ) : null}
-                  <div className="settings-actions">
-                    <button
-                      className="secondary-button subtle"
-                      disabled={
-                        previewCacheActionRunning ||
-                        previewCacheStatus?.state === 'clearing'
-                      }
-                      onClick={warmPreviewCache}
-                      type="button"
-                    >
-                      <RefreshCcw size={16} />
-                      Warm
-                    </button>
-                    <button
-                      className="secondary-button danger"
-                      disabled={previewCacheActionRunning}
-                      onClick={removePreviewCache}
-                      type="button"
-                    >
-                      <Trash2 size={16} />
-                      Clear
-                    </button>
-                  </div>
-                </section>
-              </form>
-            ) : null}
-          </div>
-        </header>
-
-        {currentError ? (
-          <section className="error-banner" role="alert">
-            <AlertCircle size={18} />
-            <span>
-              {currentError}. Server: {apiBase || 'this host'}
-            </span>
-          </section>
-        ) : null}
-
-        {activeView === 'Files' ? null : (
-          <section className="stat-grid" aria-label="Library status">
-            {libraryStats.map((stat) => {
-              const Icon = stat.icon
-
-              return (
-                <article className="stat-card" key={stat.label}>
-                  <Icon size={18} />
-                  <span>{stat.label}</span>
-                  <strong>{isLoading ? '...' : stat.value}</strong>
-                </article>
-              )
-            })}
-          </section>
-        )}
-
-        <section className="content-layout">
-          {activeView === 'Files' ? (
-            <section className="file-panel" aria-labelledby="files-heading">
-              <div className="panel-heading file-heading">
-                <div>
-                  <p className="eyebrow">
-                    {fileShare
-                      ? `Scanned ${formatScanTime(fileShare.summary.scannedAt)}`
-                      : 'Shared files'}
-                  </p>
-                  <h2 id="files-heading">Files</h2>
-                </div>
-                <div className="file-summary">
-                  {filesLoading ? (
-                    <LoaderCircle className="spin" size={16} />
-                  ) : null}
-                  <span>
-                    {formatNumber(fileShare?.summary.directories ?? 0)} folders
-                  </span>
-                  <span>{formatNumber(fileShare?.summary.files ?? 0)} files</span>
-                  <strong>{fileShare?.summary.sizeLabel ?? '0 B'}</strong>
-                </div>
-              </div>
-
-              <div className="file-breadcrumb" aria-label="Current folder">
+          ) : (
+            <button
+              className="primary-button"
+              disabled={scanRunning}
+              onClick={startScan}
+              type="button"
+            >
+              <RefreshCcw size={18} />
+              {scanRunning ? 'Scanning' : 'Scan'}
+            </button>
+          )}
+          {showSettings ? (
+            <form className="server-settings" onSubmit={saveApiSettings}>
+              <label htmlFor="server-url">Server URL</label>
+              <input
+                id="server-url"
+                onChange={(event) => setApiBaseDraft(event.target.value)}
+                placeholder="http://192.168.1.25:23232"
+                value={apiBaseDraft}
+              />
+              <div className="settings-actions">
+                <button className="secondary-button" type="submit">
+                  Save
+                </button>
                 <button
                   className="secondary-button subtle"
-                  disabled={!fileShare || !fileShare.summary.relativePath}
-                  onClick={() =>
-                    openFileDirectory(fileShare?.summary.parentPath ?? '')
-                  }
+                  onClick={() => setApiBaseDraft('')}
                   type="button"
                 >
-                  <ArrowUp size={16} />
-                  Up
+                  This host
                 </button>
-                <span title={fileShare?.summary.root}>
-                  {getFileDirectoryLabel(fileShare)}
-                </span>
               </div>
-
-              {filesLoading && !fileShare ? (
-                <div className="empty-state">
-                  <LoaderCircle className="spin" size={28} />
-                  <p>Loading files</p>
+              <section
+                className="settings-section"
+                aria-label="Encoded video cache"
+              >
+                <div className="settings-heading">
+                  <span>Encoded video cache</span>
+                  <strong>
+                    {transcodeCacheStatus
+                      ? formatTranscodeCacheState(transcodeCacheStatus)
+                      : 'Loading'}
+                  </strong>
                 </div>
-              ) : visibleFileEntries.length ? (
-                <div className="file-list">
-                  {visibleFileEntries.map((entry) =>
-                    entry.kind === 'directory' ? (
-                      <button
-                        className="file-row directory"
-                        key={entry.id}
-                        onClick={() => openFileDirectory(entry.relativePath)}
-                        title={entry.relativePath}
-                        type="button"
-                      >
-                        <Folder className="file-row-icon" size={22} />
-                        <span className="file-name">
-                          <strong>{entry.name}</strong>
-                          <span>{formatFileModifiedTime(entry.modifiedAt)}</span>
-                        </span>
-                        <span className="file-meta">Folder</span>
-                        <ChevronRight size={18} />
-                      </button>
-                    ) : (
-                      <a
-                        className="file-row"
-                        download
-                        href={resolveFileDownloadUrl(entry, apiBase)}
-                        key={entry.id}
-                        title={entry.relativePath}
-                      >
-                        <FileIcon className="file-row-icon" size={22} />
-                        <span className="file-name">
-                          <strong>{entry.name}</strong>
-                          <span>{entry.relativePath}</span>
-                        </span>
-                        <span className="file-meta">
-                          <span>{entry.sizeLabel}</span>
-                          <span className="file-modified">
-                            {formatFileModifiedTime(entry.modifiedAt)}
-                          </span>
-                        </span>
-                        <Download size={18} />
-                      </a>
-                    ),
-                  )}
-                </div>
-              ) : (
-                <div className="empty-state">
-                  <FileIcon size={30} />
-                  <p>{fileQuery ? 'No matching files' : 'No files here'}</p>
-                </div>
-              )}
-            </section>
-          ) : (
-          <section className="library-panel" aria-labelledby="library-heading">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">
-                  {library
-                    ? `Scanned ${formatScanTime(library.summary.scannedAt)}`
-                    : 'Scanning source'}
+                <label className="settings-toggle">
+                  <input
+                    checked={autoEncodeEnabled}
+                    onChange={(event) =>
+                      setAutoEncodeEnabled(event.target.checked)
+                    }
+                    type="checkbox"
+                  />
+                  <span>Automatically encode unsupported videos</span>
+                </label>
+                <p
+                  className="settings-path"
+                  title={transcodeCacheStatus?.cacheRoot}
+                >
+                  {transcodeCacheStatus?.cacheRoot ?? 'Checking cache folder'}
                 </p>
-                <h2 id="library-heading">{activeView}</h2>
-              </div>
-              <div className="segmented-control" aria-label="Library view">
-                {viewModes.map((mode) => (
+                <div className="settings-metrics">
+                  <span>
+                    {transcodeCacheStatus?.cacheSizeLabel ?? '0 B'} /{' '}
+                    {formatNumber(transcodeCacheStatus?.cacheFiles ?? 0)} files
+                  </span>
+                  <span>
+                    {formatNumber(
+                      (transcodeCacheStatus?.cachedVideos ?? 0) +
+                        (transcodeCacheStatus?.generatedVideos ?? 0),
+                    )}{' '}
+                    / {formatNumber(transcodeCacheStatus?.totalVideos ?? 0)}{' '}
+                    videos
+                  </span>
+                  <span>
+                    Target: {transcodeCacheStatus?.target ?? 'MP4 H.264/AAC'}
+                  </span>
+                </div>
+                {transcodeCacheStatus?.currentTitle ? (
+                  <p className="settings-note">
+                    {transcodeCacheStatus.currentTitle}
+                  </p>
+                ) : null}
+                {transcodeCacheStatus?.lastError ? (
+                  <p className="settings-error">
+                    {transcodeCacheStatus.lastError}
+                  </p>
+                ) : null}
+                <div className="settings-actions">
                   <button
-                    aria-pressed={activeView === mode}
-                    className={activeView === mode ? 'selected' : ''}
-                    key={mode}
-                    onClick={() => changeView(mode)}
+                    className="secondary-button subtle"
+                    disabled={
+                      transcodeCacheActionRunning ||
+                      transcodeCacheStatus?.state === 'clearing'
+                    }
+                    onClick={warmTranscodeCache}
                     type="button"
                   >
-                    {mode}
+                    <RefreshCcw size={16} />
+                    Encode
                   </button>
-                ))}
-              </div>
-            </div>
-
-            {selectedTitle && selectedItem ? (
-              <section className="main-player" aria-label="Selected title">
-                <div className="main-player-heading">
-                  <div>
-                    <p className="eyebrow">
-                      {getTitleKindLabel(selectedTitle)}
-                    </p>
-                    <h3>{selectedTitle.title}</h3>
-                    <span>{getPlaybackLabel(selectedTitle, selectedItem)}</span>
-                  </div>
-                  <div className="title-picker">
-                    <select
-                      aria-label="Select title"
-                      onChange={(event) => selectTitleById(event.target.value)}
-                      value={selectedTitle.id}
-                    >
-                      {titleOptions.map((title) => (
-                        <option key={title.id} value={title.id}>
-                          {title.title}
-                        </option>
-                      ))}
-                    </select>
-                    <span>{formatNumber(visibleTitles.length)} titles</span>
-                  </div>
-                  <div className="main-player-actions">
-                    <button
-                      className="secondary-button"
-                      onClick={playSelectedItem}
-                      type="button"
-                    >
-                      <Play fill="currentColor" size={17} />
-                      Play
-                    </button>
-                    <button
-                      className="icon-button"
-                      onClick={fullscreenSelectedItem}
-                      title="Fullscreen"
-                      type="button"
-                    >
-                      <Maximize2 size={18} />
-                    </button>
-                  </div>
+                  <button
+                    className="secondary-button danger"
+                    disabled={transcodeCacheActionRunning}
+                    onClick={removeTranscodeCache}
+                    type="button"
+                  >
+                    <Trash2 size={16} />
+                    Clear
+                  </button>
                 </div>
-
-                <div className="main-player-body">
-                  <MediaArtwork
-                    apiBase={apiBase}
-                    artworkUrl={selectedTitle.artworkUrl ?? selectedItem.artworkUrl}
-                    className="main-title-artwork"
-                    title={selectedTitle.title}
-                  />
-                  <div className="main-player-stage">
-                    <video
-                      className="main-media-player"
-                      controls
-                      key={selectedItem.id}
-                      onEnded={(event) => {
-                        recordPlayback(selectedItem, event.currentTarget, true)
-                        endPlaybackActivity(selectedItem)
-                      }}
-                      onError={() => closePlaybackActivity(selectedItem)}
-                      onLoadedMetadata={(event) =>
-                        handleLoadedMetadata(selectedItem, event)
-                      }
-                      onPause={(event) =>
-                        recordPlayback(selectedItem, event.currentTarget, true)
-                      }
-                      onPlay={() => openPlaybackActivity(selectedItem)}
-                      onPlaying={() => openPlaybackActivity(selectedItem)}
-                      onTimeUpdate={(event) =>
-                        recordPlayback(selectedItem, event.currentTarget)
-                      }
-                      preload={selectedItem.browserPlayable ? 'metadata' : 'none'}
-                      ref={playerRef}
-                      src={getPlaybackStreamUrl(selectedItem, apiBase)}
-                    />
-                  </div>
-                </div>
-
-                <div className="main-player-meta">
-                  <span>{selectedItem.relativePath}</span>
-                  {selectedPlayback ? (
-                    <strong>
-                      {selectedPlayback.completed
-                        ? 'Watched'
-                        : `Resume at ${formatDuration(
-                            selectedPlayback.position,
-                          )}`}
-                    </strong>
-                  ) : null}
-                </div>
-
-                {selectedTitle.kind === 'show' ? (
-                  <div className="main-episodes">
-                    <div className="section-heading">
-                      <h3>Episodes</h3>
-                      <span>{formatNumber(selectedTitle.episodeCount)}</span>
-                    </div>
-                    <div className="episode-list">
-                      {selectedTitle.seasons.map((season) => (
-                        <div
-                          className="season-group"
-                          key={season.seasonNumber}
-                        >
-                          <p className="eyebrow">
-                            Season {season.seasonNumber || 'Unknown'}
-                          </p>
-                          {season.episodes.map((episode) => {
-                            const episodeRecord = playbackHistory[episode.id]
-
-                            return (
-                              <button
-                                className={
-                                  selectedItem.id === episode.id
-                                    ? 'episode-row selected'
-                                    : 'episode-row'
-                                }
-                                key={episode.id}
-                                onClick={() => selectEpisode(episode)}
-                                type="button"
-                              >
-                                <span>
-                                  {formatEpisodeNumber(episode)}
-                                </span>
-                                <strong>
-                                  {episode.episodeTitle ?? episode.title}
-                                </strong>
-                                <p>
-                                  {episodeRecord
-                                    ? episodeRecord.completed
-                                      ? 'Watched'
-                                      : formatDuration(episodeRecord.position)
-                                    : getMediaContainerLabel(episode)}
-                                </p>
-                              </button>
-                            )
-                          })}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
               </section>
-            ) : null}
+              <section className="settings-section" aria-label="Preview cache">
+                <div className="settings-heading">
+                  <span>Preview cache</span>
+                  <strong>
+                    {previewCacheStatus
+                      ? formatPreviewCacheState(previewCacheStatus)
+                      : 'Loading'}
+                  </strong>
+                </div>
+                <p
+                  className="settings-path"
+                  title={previewCacheStatus?.cacheRoot}
+                >
+                  {previewCacheStatus?.cacheRoot ?? 'Checking cache folder'}
+                </p>
+                <div className="settings-metrics">
+                  <span>
+                    {previewCacheStatus?.cacheSizeLabel ?? '0 B'} /{' '}
+                    {formatNumber(previewCacheStatus?.cacheFiles ?? 0)} files
+                  </span>
+                  <span>
+                    {formatNumber(
+                      (previewCacheStatus?.cachedFrames ?? 0) +
+                        (previewCacheStatus?.generatedFrames ?? 0),
+                    )}{' '}
+                    / {formatNumber(previewCacheStatus?.totalFrames ?? 0)}{' '}
+                    frames
+                  </span>
+                  <span>
+                    {formatNumber(previewCacheStatus?.completedVideos ?? 0)} /{' '}
+                    {formatNumber(previewCacheStatus?.totalVideos ?? 0)} videos
+                  </span>
+                </div>
+                {previewCacheStatus?.currentTitle ? (
+                  <p className="settings-note">
+                    {previewCacheStatus.currentTitle}
+                  </p>
+                ) : null}
+                {previewCacheStatus?.lastError ? (
+                  <p className="settings-error">
+                    {previewCacheStatus.lastError}
+                  </p>
+                ) : null}
+                <div className="settings-actions">
+                  <button
+                    className="secondary-button subtle"
+                    disabled={
+                      previewCacheActionRunning ||
+                      previewCacheStatus?.state === 'clearing'
+                    }
+                    onClick={warmPreviewCache}
+                    type="button"
+                  >
+                    <RefreshCcw size={16} />
+                    Warm
+                  </button>
+                  <button
+                    className="secondary-button danger"
+                    disabled={previewCacheActionRunning}
+                    onClick={removePreviewCache}
+                    type="button"
+                  >
+                    <Trash2 size={16} />
+                    Clear
+                  </button>
+                </div>
+              </section>
+            </form>
+          ) : null}
+        </div>
+      </header>
 
-            {isLoading ? (
-              <div className="empty-state">
-                <LoaderCircle className="spin" size={28} />
-                <p>Scanning F:/media</p>
-              </div>
-            ) : !selectedTitle ? (
-              <div className="empty-state">
-                <FileVideo size={30} />
-                <p>No titles found</p>
-              </div>
-            ) : null}
-          </section>
+      {currentError ? (
+        <section className="error-banner" role="alert">
+          <AlertCircle size={18} />
+          <span>
+            {currentError}. Server: {apiBase || 'this host'}
+          </span>
+        </section>
+      ) : null}
+
+      {activeView === 'Files' ? (
+        <section className="file-panel" aria-labelledby="files-heading">
+          <div className="panel-heading file-heading">
+            <div>
+              <p className="eyebrow">
+                {fileShare
+                  ? `Scanned ${formatScanTime(fileShare.summary.scannedAt)}`
+                  : 'Shared files'}
+              </p>
+              <h2 id="files-heading">Files</h2>
+            </div>
+            <div className="file-summary">
+              {filesLoading ? <LoaderCircle className="spin" size={16} /> : null}
+              <span>
+                {formatNumber(fileShare?.summary.directories ?? 0)} folders
+              </span>
+              <span>{formatNumber(fileShare?.summary.files ?? 0)} files</span>
+              <strong>{fileShare?.summary.sizeLabel ?? '0 B'}</strong>
+            </div>
+          </div>
+
+          <div className="file-breadcrumb" aria-label="Current folder">
+            <button
+              className="secondary-button subtle"
+              disabled={!fileShare || !fileShare.summary.relativePath}
+              onClick={() =>
+                openFileDirectory(fileShare?.summary.parentPath ?? '')
+              }
+              type="button"
+            >
+              <ArrowUp size={16} />
+              Up
+            </button>
+            <span title={fileShare?.summary.root}>
+              {getFileDirectoryLabel(fileShare)}
+            </span>
+          </div>
+
+          {filesLoading && !fileShare ? (
+            <div className="empty-state">
+              <LoaderCircle className="spin" size={28} />
+              <p>Loading files</p>
+            </div>
+          ) : visibleFileEntries.length ? (
+            <div className="file-list">
+              {visibleFileEntries.map((entry) =>
+                entry.kind === 'directory' ? (
+                  <button
+                    className="file-row directory"
+                    key={entry.id}
+                    onClick={() => openFileDirectory(entry.relativePath)}
+                    title={entry.relativePath}
+                    type="button"
+                  >
+                    <Folder className="file-row-icon" size={22} />
+                    <span className="file-name">
+                      <strong>{entry.name}</strong>
+                      <span>{formatFileModifiedTime(entry.modifiedAt)}</span>
+                    </span>
+                    <span className="file-meta">Folder</span>
+                    <ChevronRight size={18} />
+                  </button>
+                ) : (
+                  <a
+                    className="file-row"
+                    download
+                    href={resolveFileDownloadUrl(entry, apiBase)}
+                    key={entry.id}
+                    title={entry.relativePath}
+                  >
+                    <FileIcon className="file-row-icon" size={22} />
+                    <span className="file-name">
+                      <strong>{entry.name}</strong>
+                      <span>{entry.relativePath}</span>
+                    </span>
+                    <span className="file-meta">
+                      <span>{entry.sizeLabel}</span>
+                      <span className="file-modified">
+                        {formatFileModifiedTime(entry.modifiedAt)}
+                      </span>
+                    </span>
+                    <Download size={18} />
+                  </a>
+                ),
+              )}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <FileIcon size={30} />
+              <p>{fileQuery ? 'No matching files' : 'No files here'}</p>
+            </div>
           )}
         </section>
-      </section>
+      ) : (
+        <section className="media-workspace" aria-labelledby="library-heading">
+          <section className="media-hero" aria-live="polite">
+            <MediaArtwork
+              apiBase={apiBase}
+              artworkUrl={selectedTitle?.artworkUrl ?? selectedItem?.artworkUrl}
+              className="hero-artwork"
+              title={selectedTitle?.title ?? 'My Home Media Server'}
+            />
+            <div className="media-hero-copy">
+              <p className="eyebrow">
+                {library
+                  ? `Scanned ${formatScanTime(library.summary.scannedAt)}`
+                  : 'Scanning source'}
+              </p>
+              <h2 id="library-heading">
+                {selectedTitle?.title ?? 'My Home Media Server'}
+              </h2>
+              <div className="media-hero-meta">
+                <span>{selectedTitle ? getTitleKindLabel(selectedTitle) : activeView}</span>
+                <span>
+                  {selectedTitle
+                    ? getTitleSubtitle(selectedTitle)
+                    : `${formatNumber(library?.summary.totalVideos ?? 0)} files`}
+                </span>
+                <span>
+                  {selectedTitle
+                    ? getTitleSourceLabel(selectedTitle)
+                    : library?.summary.root ?? 'Server'}
+                </span>
+                {selectedPlayback && !selectedPlayback.completed ? (
+                  <span>{formatDuration(selectedPlayback.position)}</span>
+                ) : null}
+              </div>
+              <div className="media-hero-actions">
+                <button
+                  className="primary-button hero-action"
+                  disabled={!selectedItem}
+                  onClick={playSelectedItem}
+                  type="button"
+                >
+                  <Play fill="currentColor" size={18} />
+                  {getPrimaryActionLabel(
+                    selectedTitle,
+                    selectedItem,
+                    selectedPlayback,
+                  )}
+                </button>
+                <button
+                  className="secondary-button subtle"
+                  disabled={!selectedTitle}
+                  onClick={markSelectedTitleWatched}
+                  type="button"
+                >
+                  <Check size={17} />
+                  Mark watched
+                </button>
+                <button
+                  className="secondary-button subtle"
+                  disabled={!selectedTitle}
+                  onClick={clearSelectedTitleProgress}
+                  type="button"
+                >
+                  Clear progress
+                </button>
+              </div>
+            </div>
+            <div className="hero-status">
+              <Server size={18} />
+              <span>{apiBase || 'This host'}</span>
+              <strong>{formatNumber(visibleTitles.length)} titles</strong>
+            </div>
+          </section>
+
+          {isLoading ? (
+            <div className="empty-state">
+              <LoaderCircle className="spin" size={28} />
+              <p>Scanning F:/media</p>
+            </div>
+          ) : !selectedTitle ? (
+            <div className="empty-state">
+              <FileVideo size={30} />
+              <p>No titles found</p>
+            </div>
+          ) : null}
+
+          {!isLoading && browseSections.length ? (
+            <section className="media-rows" aria-label="Media rows">
+              {browseSections.map((section) => (
+                <section className="media-row" key={section.id}>
+                  <div className="section-heading">
+                    <h3>{section.label}</h3>
+                    <span>{formatNumber(section.titles.length)}</span>
+                  </div>
+                  <div className="media-card-row">
+                    {section.titles.map((title) => {
+                      const isSelected = selectedTitle?.id === title.id
+                      const playback = getTitleProgressRecord(
+                        title,
+                        playbackHistory,
+                      )
+
+                      return (
+                        <button
+                          className={
+                            isSelected ? 'media-card selected' : 'media-card'
+                          }
+                          key={`${section.id}:${title.id}`}
+                          onClick={() => {
+                            selectTitle(title)
+
+                            if (section.id === 'continue') {
+                              startPlayback(title.resumeItem)
+                            }
+                          }}
+                          type="button"
+                        >
+                          <MediaArtwork
+                            apiBase={apiBase}
+                            artworkUrl={title.artworkUrl}
+                            className="media-card-art"
+                            title={title.title}
+                          />
+                          <span>{title.kind === 'show' ? 'TV' : 'Movie'}</span>
+                          <strong>{title.title}</strong>
+                          <p>
+                            {section.id === 'continue'
+                              ? getPlaybackLabel(title, title.resumeItem)
+                              : getTitleSubtitle(title)}
+                          </p>
+                          {playback && playback.duration > 0 ? (
+                            <div className="tv-progress" aria-hidden="true">
+                              <i
+                                style={{
+                                  width: `${getTitleProgressPercent(playback)}%`,
+                                }}
+                              />
+                            </div>
+                          ) : null}
+                        </button>
+                      )
+                    })}
+                  </div>
+                </section>
+              ))}
+            </section>
+          ) : null}
+
+          {selectedTitle ? (
+            <section className="title-detail" aria-label="Selected title detail">
+              <div className="detail-heading">
+                <div>
+                  <p className="eyebrow">
+                    {selectedTitle.kind === 'show'
+                      ? selectedTitle.source
+                      : selectedTitle.item.source}
+                  </p>
+                  <h2>{selectedTitle.title}</h2>
+                </div>
+                <span>{getDetailItemsCountLabel(selectedTitle)}</span>
+              </div>
+
+              <div className="detail-list">
+                {selectedTitle.kind === 'show' ? (
+                  selectedTitle.seasons.map((season) => (
+                    <section className="season-group" key={season.seasonNumber}>
+                      <p className="eyebrow">
+                        Season {season.seasonNumber || 'Unknown'}
+                      </p>
+                      {season.episodes.map((episode) => {
+                        const episodeRecord = playbackHistory[episode.id] ?? null
+                        const isSelected = selectedItem?.id === episode.id
+
+                        return (
+                          <div
+                            className={
+                              isSelected
+                                ? 'episode-row selected'
+                                : 'episode-row'
+                            }
+                            key={episode.id}
+                          >
+                            <button
+                              className="episode-play"
+                              onClick={() => {
+                                selectEpisode(episode)
+                                startPlayback(episode)
+                              }}
+                              type="button"
+                            >
+                              <span>{formatEpisodeNumber(episode)}</span>
+                              <strong>{getDetailItemTitle(episode)}</strong>
+                              <p>{getDetailPlaybackLabel(episode, episodeRecord)}</p>
+                              {episodeRecord && episodeRecord.duration > 0 ? (
+                                <div className="tv-progress" aria-hidden="true">
+                                  <i
+                                    style={{
+                                      width: `${getTitleProgressPercent(
+                                        episodeRecord,
+                                      )}%`,
+                                    }}
+                                  />
+                                </div>
+                              ) : null}
+                            </button>
+                            <div className="episode-actions">
+                              <button
+                                className="icon-button"
+                                onClick={() => markItemsWatched([episode])}
+                                title="Mark watched"
+                                type="button"
+                              >
+                                <Check size={17} />
+                              </button>
+                              <button
+                                className="icon-button"
+                                onClick={() => markItemsUnwatched([episode])}
+                                title="Clear progress"
+                                type="button"
+                              >
+                                <X size={17} />
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </section>
+                  ))
+                ) : (
+                  <div className="episode-row selected">
+                    <button
+                      className="episode-play"
+                      onClick={() => startPlayback(selectedTitle.item)}
+                      type="button"
+                    >
+                      <span>{selectedTitle.item.container}</span>
+                      <strong>{selectedTitle.title}</strong>
+                      <p>
+                        {getDetailPlaybackLabel(selectedTitle.item, selectedPlayback)}
+                      </p>
+                      {selectedPlayback && selectedPlayback.duration > 0 ? (
+                        <div className="tv-progress" aria-hidden="true">
+                          <i
+                            style={{
+                              width: `${getTitleProgressPercent(
+                                selectedPlayback,
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                    </button>
+                    <div className="episode-actions">
+                      <button
+                        className="icon-button"
+                        onClick={() => markItemsWatched([selectedTitle.item])}
+                        title="Mark watched"
+                        type="button"
+                      >
+                        <Check size={17} />
+                      </button>
+                      <button
+                        className="icon-button"
+                        onClick={() => markItemsUnwatched([selectedTitle.item])}
+                        title="Clear progress"
+                        type="button"
+                      >
+                        <X size={17} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+          ) : null}
+        </section>
+      )}
     </main>
   )
 }
@@ -1690,6 +1861,72 @@ function MediaArtwork({
       )}
     </div>
   )
+}
+
+function buildBrowseSections(
+  collections: LibraryCollections,
+  activeView: MediaViewMode,
+  query: string,
+): BrowseSection[] {
+  if (query.trim()) {
+    const sections: BrowseSection[] = [
+      {
+        id: 'results',
+        label: 'Search results',
+        titles: filterTitles(collections.all, query).sort(sortByTitle),
+      },
+    ]
+
+    return sections.filter((section) => section.titles.length)
+  }
+
+  if (activeView === 'Movies') {
+    const sections: BrowseSection[] = [
+      {
+        id: 'movies',
+        label: 'Movies',
+        titles: collections.movies,
+      },
+    ]
+
+    return sections.filter((section) => section.titles.length)
+  }
+
+  if (activeView === 'TV Shows') {
+    const sections: BrowseSection[] = [
+      {
+        id: 'shows',
+        label: 'TV Shows',
+        titles: collections.shows,
+      },
+    ]
+
+    return sections.filter((section) => section.titles.length)
+  }
+
+  const continueTitles = collections.all
+    .filter((title) => title.lastWatchedAt)
+    .sort(sortByLastWatched)
+
+  const sections: BrowseSection[] = [
+    {
+      id: 'continue',
+      label: 'Continue',
+      titles: continueTitles,
+    },
+    {
+      id: 'shows',
+      label: 'TV Shows',
+      titles: collections.shows,
+    },
+    {
+      id: 'movies',
+      label: 'Movies',
+      titles: collections.movies,
+    },
+  ]
+
+  return sections.filter((section) => section.titles.length)
 }
 
 function buildCollections(
@@ -2192,12 +2429,101 @@ function getTitleKindLabel(title: LibraryTitle) {
   return title.kind === 'show' ? 'TV Show' : 'Movie'
 }
 
+function getTitleItems(title: LibraryTitle) {
+  return title.kind === 'movie' ? [title.item] : title.episodes
+}
+
+function getTitleSubtitle(title: LibraryTitle) {
+  if (title.kind === 'movie') {
+    return title.item.sizeLabel
+  }
+
+  const seasonCount = title.seasons.length
+
+  return `${formatCountLabel(title.episodeCount, 'episode')}, ${formatCountLabel(
+    seasonCount,
+    'season',
+  )}`
+}
+
+function getTitleSourceLabel(title: LibraryTitle) {
+  return title.kind === 'movie' ? title.item.source : title.source
+}
+
+function getTitleProgressRecord(
+  title: LibraryTitle,
+  history: PlaybackHistory,
+) {
+  const item = title.kind === 'movie' ? title.item : title.resumeItem
+
+  return item ? history[item.id] ?? null : null
+}
+
+function getTitleProgressPercent(record: PlaybackRecord) {
+  if (record.duration <= 0) {
+    return 0
+  }
+
+  return Math.min((record.position / record.duration) * 100, 100)
+}
+
 function getPlaybackLabel(title: LibraryTitle, item: MediaItem | null) {
   if (title.kind === 'show' && item) {
     return `${formatEpisodeNumber(item)} · ${getMediaContainerLabel(item)}`
   }
 
   return item ? getMediaContainerLabel(item) : 'Indexed'
+}
+
+function getPrimaryActionLabel(
+  title: LibraryTitle | null,
+  item: MediaItem | null,
+  playback: PlaybackRecord | null,
+) {
+  if (!title || !item) {
+    return 'Play'
+  }
+
+  const actionLabel = playback && !playback.completed ? 'Resume' : 'Play'
+
+  if (title.kind === 'show') {
+    return `${actionLabel} ${formatEpisodeNumber(item)}`
+  }
+
+  return actionLabel
+}
+
+function getDetailItemsCountLabel(title: LibraryTitle) {
+  return title.kind === 'show'
+    ? formatCountLabel(title.episodeCount, 'episode')
+    : '1 file'
+}
+
+function getDetailItemTitle(item: MediaItem) {
+  return item.episodeTitle ?? item.title
+}
+
+function getDetailPlaybackLabel(
+  item: MediaItem,
+  playback: PlaybackRecord | null,
+) {
+  if (!playback) {
+    return getMediaContainerLabel(item)
+  }
+
+  return playback.completed
+    ? 'Watched'
+    : `Resume ${formatDuration(playback.position)}`
+}
+
+function getPlayerTitle(item: MediaItem) {
+  return item.showTitle ?? item.title
+}
+
+function getPlayerSubtitle(item: MediaItem) {
+  return item.category === 'show'
+    ? `${formatEpisodeNumber(item)} · ${getMediaContainerLabel(item)}`
+    : getMediaContainerLabel(item)
 }
 
 function getMediaContainerLabel(item: MediaItem) {
@@ -2234,6 +2560,10 @@ function formatTranscodeCacheState(status: TranscodeCacheStatus) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value)
+}
+
+function formatCountLabel(count: number, label: string) {
+  return `${formatNumber(count)} ${label}${count === 1 ? '' : 's'}`
 }
 
 function formatPreviewCacheState(status: PreviewCacheStatus) {
