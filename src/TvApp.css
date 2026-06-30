@@ -213,6 +213,12 @@ button {
   color: #d4dbdc;
 }
 
+.tv-primary-action.selected {
+  background: #fffdf6;
+  border-color: var(--tv-gold);
+  color: #15181b;
+}
+
 .tv-error,
 .tv-loading {
   border-radius: 8px;

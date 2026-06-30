@@ -103,7 +103,10 @@ type TvSection = {
   titles: TvTitle[]
 }
 
+type BrowseFocusArea = 'hero' | 'rows' | 'settings'
+
 type FocusPosition = {
+  area: BrowseFocusArea
   itemIndex: number
   sectionIndex: number
 }
@@ -521,6 +524,7 @@ function TvApp() {
   const [detailState, setDetailState] = useState<DetailState | null>(null)
   const [error, setError] = useState<LibraryErrorState | null>(null)
   const [focus, setFocus] = useState<FocusPosition>({
+    area: 'rows',
     itemIndex: 0,
     sectionIndex: 0,
   })
@@ -1785,6 +1789,10 @@ function TvApp() {
   }, [activePlayerItemId, apiBase])
 
   useEffect(() => {
+    if (safeFocus.area !== 'rows') {
+      return
+    }
+
     const selectedCard = selectedCardRef.current
     const row = selectedCard?.parentElement
 
@@ -1796,9 +1804,13 @@ function TvApp() {
       selectedCard.offsetLeft - row.clientWidth / 2 + selectedCard.clientWidth / 2,
       0,
     )
-  }, [safeFocus.itemIndex, safeFocus.sectionIndex])
+  }, [safeFocus.area, safeFocus.itemIndex, safeFocus.sectionIndex])
 
   useEffect(() => {
+    if (safeFocus.area !== 'rows') {
+      return
+    }
+
     const rows = rowsRef.current
     const selectedRow = selectedRowRef.current
 
@@ -1818,7 +1830,7 @@ function TvApp() {
     if (rowBounds.bottom > rowsBounds.bottom) {
       rows.scrollTop += rowBounds.bottom - rowsBounds.bottom + padding
     }
-  }, [safeFocus.sectionIndex])
+  }, [safeFocus.area, safeFocus.sectionIndex])
 
   useEffect(() => {
     const list = detailListRef.current
@@ -1870,17 +1882,52 @@ function TvApp() {
 
   function handleBrowseAction(action: RemoteAction) {
     if (action === 'enter' || action === 'play' || action === 'playPause') {
+      if (safeFocus.area === 'settings') {
+        openSettingsMenu()
+        return
+      }
+
       activateTitle(activeSection, selectedTitle)
       return
     }
 
     if (action === 'left' || action === 'right') {
-      moveFocus(0, action === 'right' ? 1 : -1)
+      if (safeFocus.area === 'rows' || safeFocus.area === 'hero') {
+        moveFocus(
+          0,
+          action === 'right' ? 1 : -1,
+          safeFocus.area === 'hero' ? 'hero' : 'rows',
+        )
+      }
+
       return
     }
 
-    if (action === 'up' || action === 'down') {
-      moveFocus(action === 'down' ? 1 : -1, 0)
+    if (action === 'up') {
+      if (safeFocus.area === 'rows') {
+        setFocusArea('hero')
+        return
+      }
+
+      if (safeFocus.area === 'hero') {
+        setFocusArea('settings')
+      }
+
+      return
+    }
+
+    if (action === 'down') {
+      if (safeFocus.area === 'settings') {
+        setFocusArea('hero')
+        return
+      }
+
+      if (safeFocus.area === 'hero') {
+        setFocusArea('rows')
+        return
+      }
+
+      moveFocus(1, 0)
     }
   }
 
@@ -2055,7 +2102,11 @@ function TvApp() {
     }
   }
 
-  function moveFocus(sectionDelta: number, itemDelta: number) {
+  function moveFocus(
+    sectionDelta: number,
+    itemDelta: number,
+    area: BrowseFocusArea = 'rows',
+  ) {
     setFocus((currentFocus) => {
       const nextSectionIndex = clamp(
         currentFocus.sectionIndex + sectionDelta,
@@ -2068,10 +2119,18 @@ function TvApp() {
         : clamp(currentFocus.itemIndex + itemDelta, 0, Math.max(rowLength - 1, 0))
 
       return {
+        area,
         itemIndex: nextItemIndex,
         sectionIndex: nextSectionIndex,
       }
     })
+  }
+
+  function setFocusArea(area: BrowseFocusArea) {
+    setFocus((currentFocus) => ({
+      ...currentFocus,
+      area,
+    }))
   }
 
   function activateTitle(section: TvSection | null, title: TvTitle | null) {
@@ -4627,7 +4686,12 @@ function TvApp() {
           <small>{apiBase || 'Local package'}</small>
           <button
             aria-label="TV playback settings"
-            className="tv-icon-button tv-topbar-settings-button"
+            className={[
+              'tv-icon-button tv-topbar-settings-button',
+              safeFocus.area === 'settings' ? 'selected' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
             onClick={openSettingsMenu}
             title="TV playback settings"
             type="button"
@@ -4665,7 +4729,12 @@ function TvApp() {
             ) : null}
           </div>
           <button
-            className="tv-primary-action"
+            className={[
+              'tv-primary-action',
+              safeFocus.area === 'hero' ? 'selected' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
             disabled={!selectedItem}
             onClick={() => activateTitle(activeSection, selectedTitle)}
             type="button"
@@ -4712,6 +4781,7 @@ function TvApp() {
                 className="tv-row"
                 key={section.id}
                 ref={
+                  safeFocus.area === 'rows' &&
                   safeFocus.sectionIndex === sectionIndex
                     ? selectedRowRef
                     : null
@@ -4724,6 +4794,7 @@ function TvApp() {
                 <div className="tv-card-row">
                   {section.titles.map((title, itemIndex) => {
                     const isSelected =
+                      safeFocus.area === 'rows' &&
                       safeFocus.sectionIndex === sectionIndex &&
                       safeFocus.itemIndex === itemIndex
                     const playback = title.resumeItem
@@ -4735,7 +4806,7 @@ function TvApp() {
                         className={isSelected ? 'tv-card selected' : 'tv-card'}
                         key={title.id}
                         onClick={() => {
-                          setFocus({ itemIndex, sectionIndex })
+                          setFocus({ area: 'rows', itemIndex, sectionIndex })
                           activateTitle(section, title)
                         }}
                         ref={isSelected ? selectedCardRef : null}
@@ -5150,6 +5221,7 @@ function clampFocus(focus: FocusPosition, sections: TvSection[]) {
   )
 
   return {
+    area: focus.area,
     itemIndex,
     sectionIndex,
   }
