@@ -47,6 +47,7 @@ type RemoteAction =
   | 'playPause'
   | 'right'
   | 'up'
+type TvUiRecoveryTrigger = RemoteAction | 'quickJump'
 
 type PlaybackStrategy = 'native' | 'transcode'
 type PlayerEngine = 'avplay' | 'html'
@@ -337,6 +338,17 @@ type MyHomeMediaServerWindow = Window & {
       is8KPanelSupported?: () => boolean
       isUHDAModel?: () => boolean
     }
+    appcommon?: {
+      AppCommonScreenSaverState?: {
+        SCREEN_SAVER_OFF?: number | string
+        SCREEN_SAVER_ON?: number | string
+      }
+      setScreenSaver?: (
+        state: number | string,
+        onSuccess?: () => void,
+        onError?: (error: unknown) => void,
+      ) => void
+    }
   }
   tizen?: {
     application?: {
@@ -348,6 +360,10 @@ type MyHomeMediaServerWindow = Window & {
     tvinputdevice?: {
       registerKey?: (key: string) => void
       registerKeyBatch?: (keys: string[]) => void
+    }
+    power?: {
+      release?: (resource: string) => void
+      request?: (resource: string, state: string) => void
     }
   }
 }
@@ -406,8 +422,9 @@ const tvDiagnosticsLocalPersistDelayMs = 5000
 const tvDiagnosticsMaxBatchEvents = 6
 const tvDiagnosticsMaxLocalEvents = 250
 const tvDiagnosticsStorageKey = 'my-home-media-server-tv-diagnostics-v1'
+const tvPlayerInputIdleRecoveryMs = 60_000
 const tvUiStallRecoveryCooldownMs = 15_000
-const tvUiStallRecoveryMs = tvDiagnosticsHeartbeatMs * 2 + 10_000
+const tvUiStallRecoveryMs = 5_000
 const tvNativePlaybackContainers = new Set([
   'ASF',
   'AVI',
@@ -607,6 +624,7 @@ function TvApp() {
   const tvLastClockRenderAtRef = useRef(getCurrentTimestamp())
   const tvLastClockUpdateAtRef = useRef(getCurrentTimestamp())
   const tvLastDiagnosticsHeartbeatAtRef = useRef(getCurrentTimestamp())
+  const tvLastPlayerInputAtRef = useRef(getCurrentTimestamp())
   const tvLastRenderAtRef = useRef(getCurrentTimestamp())
   const tvLastUiRecoveryAtRef = useRef(0)
   const tvUiRecoveryCountRef = useRef(0)
@@ -1672,6 +1690,24 @@ function TvApp() {
       return
     }
 
+    recordTvDiagnosticRef.current(
+      'tv-keep-awake-enable',
+      setTvPlayerKeepAwake(true),
+    )
+
+    return () => {
+      recordTvDiagnosticRef.current(
+        'tv-keep-awake-disable',
+        setTvPlayerKeepAwake(false),
+      )
+    }
+  }, [activePlayerItemId])
+
+  useEffect(() => {
+    if (!activePlayerItemId) {
+      return
+    }
+
     const clientId = playbackActivityClientIdRef.current
 
     function sendOpenHeartbeat() {
@@ -2354,11 +2390,12 @@ function TvApp() {
       diagnosticsHeartbeatStaleMs: tvDiagnosticsEnabled
         ? Math.max(0, now - tvLastDiagnosticsHeartbeatAtRef.current)
         : null,
+      playerInputIdleMs: Math.max(0, now - tvLastPlayerInputAtRef.current),
       renderStaleMs: Math.max(0, now - tvLastRenderAtRef.current),
     }
   }
 
-  function recoverStalledTvUi(action: RemoteAction) {
+  function recoverStalledTvUi(trigger: TvUiRecoveryTrigger) {
     if (!playerItem) {
       return {
         recovered: false,
@@ -2372,13 +2409,15 @@ function TvApp() {
       snapshotBefore && !snapshotBefore.paused && !snapshotBefore.ended,
     )
     const heartbeatStaleMs = freshness.diagnosticsHeartbeatStaleMs ?? 0
-    const isStale =
+    const isInputIdle =
+      freshness.playerInputIdleMs >= tvPlayerInputIdleRecoveryMs
+    const isVisuallyStale =
       freshness.renderStaleMs >= tvUiStallRecoveryMs ||
       freshness.clockRenderStaleMs >= tvUiStallRecoveryMs ||
       heartbeatStaleMs >= tvUiStallRecoveryMs ||
       (isPlaying && freshness.clockUpdateStaleMs >= tvUiStallRecoveryMs)
 
-    if (!isStale) {
+    if (!isInputIdle && !isVisuallyStale) {
       return {
         recovered: false,
         ...freshness,
@@ -2426,12 +2465,14 @@ function TvApp() {
     tvUiRecoveryCountRef.current = recoveryIndex
 
     recordTvDiagnostic('ui-stall-recover-request', {
-      action,
       avPlayState,
       freshness,
+      isInputIdle,
+      isVisuallyStale,
       liveSnapshot,
       recoveryIndex,
       snapshotBefore,
+      trigger,
     }, {
       immediate: true,
       includeDom: true,
@@ -2488,6 +2529,8 @@ function TvApp() {
     })
 
     return {
+      isInputIdle,
+      isVisuallyStale,
       recovered: true,
       recoveryIndex,
       ...freshness,
@@ -2810,6 +2853,7 @@ function TvApp() {
     clearPlayerHudTimeout()
     clearPlayerStartupTimeout()
     pendingHtmlResumeShouldPlayRef.current = true
+    tvLastPlayerInputAtRef.current = getCurrentTimestamp()
     setHtmlPlayerShouldAutoPlay(true)
     markPlayerActive()
     setPlayerClock({
@@ -3873,9 +3917,18 @@ function TvApp() {
         return
       }
 
-      const uiRecovery = action
-        ? recoverStalledTvUi(action)
+      const uiRecoveryTrigger: TvUiRecoveryTrigger | null = action
+        ? action
+        : quickJumpDigit !== null && playerItem
+          ? 'quickJump'
+          : null
+      const uiRecovery = uiRecoveryTrigger
+        ? recoverStalledTvUi(uiRecoveryTrigger)
         : { recovered: false }
+
+      if (playerItem && uiRecoveryTrigger) {
+        tvLastPlayerInputAtRef.current = getCurrentTimestamp()
+      }
 
       if (quickJumpDigit !== null && playerItem) {
         event.preventDefault()
@@ -3885,6 +3938,9 @@ function TvApp() {
             digit: quickJumpDigit,
             key: event.key,
             keyCode: event.keyCode,
+            uiRecovery,
+          }, {
+            immediate: uiRecovery.recovered === true,
           })
         }
 
@@ -6977,6 +7033,57 @@ function pulseTvUiCompositor(recoveryIndex: number) {
   } catch {
     // Compositor nudges are best-effort and must never affect playback.
   }
+}
+
+function setTvPlayerKeepAwake(keepAwake: boolean): TvDiagnosticDetail {
+  const tvWindow = window as MyHomeMediaServerWindow
+  const appcommon = tvWindow.webapis?.appcommon
+  const screenSaverState = keepAwake
+    ? appcommon?.AppCommonScreenSaverState?.SCREEN_SAVER_OFF
+    : appcommon?.AppCommonScreenSaverState?.SCREEN_SAVER_ON
+  const detail: TvDiagnosticDetail = {
+    keepAwake,
+  }
+
+  if (!appcommon?.setScreenSaver) {
+    detail.screenSaver = 'unavailable'
+  } else if (screenSaverState === undefined) {
+    detail.screenSaver = 'missing-state'
+  } else {
+    try {
+      appcommon.setScreenSaver(
+        screenSaverState,
+        () => undefined,
+        () => undefined,
+      )
+      detail.screenSaver = 'ok'
+      detail.screenSaverState = String(screenSaverState)
+    } catch (error) {
+      detail.screenSaver = 'failed'
+      detail.screenSaverError = getErrorMessage(error)
+    }
+  }
+
+  const power = tvWindow.tizen?.power
+
+  if (!power?.request && !power?.release) {
+    detail.power = 'unavailable'
+  } else {
+    try {
+      if (keepAwake) {
+        power.request?.('SCREEN', 'SCREEN_NORMAL')
+      } else {
+        power.release?.('SCREEN')
+      }
+
+      detail.power = 'ok'
+    } catch (error) {
+      detail.power = 'failed'
+      detail.powerError = getErrorMessage(error)
+    }
+  }
+
+  return detail
 }
 
 function getErrorMessage(error: unknown) {
