@@ -292,6 +292,11 @@ type AvPlayPlaybackSnapshot = ActivePlaybackSnapshot & {
 
 type TvDiagnosticDetail = Record<string, unknown>
 
+type TvDiagnosticOptions = {
+  immediate?: boolean
+  includeDom?: boolean
+}
+
 type TvDiagnosticEvent = {
   appVersion: string
   at: string
@@ -519,7 +524,7 @@ function TvApp() {
     (
       kind: string,
       detail?: TvDiagnosticDetail,
-      options?: { immediate?: boolean },
+      options?: TvDiagnosticOptions,
     ) => void
   >(() => undefined)
   const detailListRef = useRef<HTMLDivElement | null>(null)
@@ -1323,13 +1328,17 @@ function TvApp() {
   function recordTvDiagnostic(
     kind: string,
     detail: TvDiagnosticDetail = {},
-    options: { immediate?: boolean } = {},
+    options: TvDiagnosticOptions = {},
   ) {
     if (!tvDiagnosticsEnabled) {
       return
     }
 
-    const event = buildTvDiagnosticEvent(kind, detail)
+    const event = buildTvDiagnosticEvent(
+      kind,
+      detail,
+      options.includeDom === true,
+    )
     const queue = tvDiagnosticsQueueRef.current
 
     queue.push(event)
@@ -1345,7 +1354,7 @@ function TvApp() {
   function recordTvDiagnosticAfterPaint(
     kind: string,
     detail: TvDiagnosticDetail = {},
-    options: { immediate?: boolean } = {},
+    options: TvDiagnosticOptions = {},
   ) {
     window.setTimeout(() => {
       if (typeof window.requestAnimationFrame === 'function') {
@@ -1362,6 +1371,7 @@ function TvApp() {
   function buildTvDiagnosticEvent(
     kind: string,
     detail: TvDiagnosticDetail,
+    includeDom: boolean,
   ): TvDiagnosticEvent {
     const snapshot = readActivePlaybackSnapshot()
     const player = playerRef.current
@@ -1375,7 +1385,7 @@ function TvApp() {
       at: new Date().toISOString(),
       clientId: playbackActivityClientIdRef.current,
       detail,
-      dom: readTvDomDiagnostics(),
+      dom: includeDom ? readTvDomDiagnostics() : { skipped: true },
       env: {
         apiBase,
         documentHidden: document.hidden,
@@ -1538,7 +1548,10 @@ function TvApp() {
       return
     }
 
-    recordTvDiagnosticRef.current('app-start', {}, { immediate: true })
+    recordTvDiagnosticRef.current('app-start', {}, {
+      immediate: true,
+      includeDom: true,
+    })
 
     tvDiagnosticsHeartbeatIntervalRef.current = window.setInterval(() => {
       recordTvDiagnosticRef.current('heartbeat')
@@ -2102,6 +2115,7 @@ function TvApp() {
     setPlayerEpisodeSwitchTargetId(null)
     showPlayerHud()
     recordTvDiagnosticAfterPaint('blackout-show-after-paint', {}, {
+      includeDom: true,
       immediate: true,
     })
   }
@@ -2144,6 +2158,7 @@ function TvApp() {
         action,
         snapshot,
       }, {
+        includeDom: true,
         immediate: true,
       })
       refreshAvPlayPausedSurface(snapshot)
@@ -2160,6 +2175,7 @@ function TvApp() {
       shouldPlayAfterRefresh,
       snapshot,
     }, {
+      includeDom: true,
       immediate: true,
     })
     refreshHtmlPlayerSurface(snapshot, shouldPlayAfterRefresh)
@@ -2774,8 +2790,6 @@ function TvApp() {
     showPlayerHud()
     recordTvDiagnosticAfterPaint('scan-begin-after-paint', {
       nextPreview,
-    }, {
-      immediate: true,
     })
   }
 
