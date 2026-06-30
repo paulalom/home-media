@@ -387,6 +387,7 @@ const scanSpeedMultipliers = [2, 4, 6, 8, 10] as const
 const samsungMediaKeys = ['MediaPlayPause', 'MediaPlay', 'MediaPause']
 const tvDiagnosticsFlushDelayMs = 1200
 const tvDiagnosticsHeartbeatMs = 60_000
+const tvDiagnosticsLocalPersistDelayMs = 5000
 const tvDiagnosticsMaxBatchEvents = 6
 const tvDiagnosticsMaxLocalEvents = 250
 const tvDiagnosticsStorageKey = 'my-home-media-server-tv-diagnostics-v1'
@@ -583,6 +584,7 @@ function TvApp() {
   const tvDiagnosticsFlushTimeoutRef = useRef<number | null>(null)
   const tvDiagnosticsHeartbeatIntervalRef = useRef<number | null>(null)
   const tvDiagnosticsInFlightRef = useRef(false)
+  const tvDiagnosticsLocalPersistTimeoutRef = useRef<number | null>(null)
   const tvDiagnosticsQueueRef = useRef<TvDiagnosticEvent[]>([])
   const tvDiagnosticsSequenceRef = useRef(0)
   const scanPreviewVisualRequest =
@@ -1334,21 +1336,27 @@ function TvApp() {
       return
     }
 
-    const event = buildTvDiagnosticEvent(
-      kind,
-      detail,
-      options.includeDom === true,
-    )
-    const queue = tvDiagnosticsQueueRef.current
+    try {
+      const event = buildTvDiagnosticEvent(
+        kind,
+        detail,
+        options.includeDom === true,
+      )
+      const queue = tvDiagnosticsQueueRef.current
 
-    queue.push(event)
+      queue.push(event)
 
-    if (queue.length > tvDiagnosticsMaxLocalEvents) {
-      queue.splice(0, queue.length - tvDiagnosticsMaxLocalEvents)
+      if (queue.length > tvDiagnosticsMaxLocalEvents) {
+        queue.splice(0, queue.length - tvDiagnosticsMaxLocalEvents)
+      }
+
+      scheduleLocalTvDiagnosticsPersist()
+      scheduleTvDiagnosticsFlush(
+        options.immediate ? 0 : tvDiagnosticsFlushDelayMs,
+      )
+    } catch {
+      // Diagnostics must never interrupt playback or remote handling.
     }
-
-    persistLocalTvDiagnostics(queue)
-    scheduleTvDiagnosticsFlush(options.immediate ? 0 : tvDiagnosticsFlushDelayMs)
   }
 
   function recordTvDiagnosticAfterPaint(
@@ -1376,6 +1384,7 @@ function TvApp() {
     const snapshot = readActivePlaybackSnapshot()
     const player = playerRef.current
     const avPlay = getAvPlay()
+    const memoryStats = getBrowserMemoryStats()
     const sequence = tvDiagnosticsSequenceRef.current + 1
 
     tvDiagnosticsSequenceRef.current = sequence
@@ -1393,6 +1402,7 @@ function TvApp() {
         hasFocus: document.hasFocus(),
         href: window.location.href,
         isAppVisible,
+        memory: memoryStats,
         online: navigator.onLine,
         userAgent: navigator.userAgent,
       },
@@ -1442,14 +1452,33 @@ function TvApp() {
   }
 
   function scheduleTvDiagnosticsFlush(delayMs: number) {
-    if (tvDiagnosticsFlushTimeoutRef.current !== null) {
-      window.clearTimeout(tvDiagnosticsFlushTimeoutRef.current)
+    try {
+      if (tvDiagnosticsFlushTimeoutRef.current !== null) {
+        window.clearTimeout(tvDiagnosticsFlushTimeoutRef.current)
+      }
+
+      tvDiagnosticsFlushTimeoutRef.current = window.setTimeout(() => {
+        tvDiagnosticsFlushTimeoutRef.current = null
+        void flushTvDiagnostics()
+      }, delayMs)
+    } catch {
+      // Best-effort telemetry only.
+    }
+  }
+
+  function scheduleLocalTvDiagnosticsPersist() {
+    if (tvDiagnosticsLocalPersistTimeoutRef.current !== null) {
+      return
     }
 
-    tvDiagnosticsFlushTimeoutRef.current = window.setTimeout(() => {
-      tvDiagnosticsFlushTimeoutRef.current = null
-      void flushTvDiagnostics()
-    }, delayMs)
+    try {
+      tvDiagnosticsLocalPersistTimeoutRef.current = window.setTimeout(() => {
+        tvDiagnosticsLocalPersistTimeoutRef.current = null
+        persistLocalTvDiagnostics(tvDiagnosticsQueueRef.current)
+      }, tvDiagnosticsLocalPersistDelayMs)
+    } catch {
+      // Local storage backup is optional.
+    }
   }
 
   async function flushTvDiagnostics() {
@@ -1486,7 +1515,7 @@ function TvApp() {
         throw new Error(`TV diagnostics failed (${response.status})`)
       }
 
-      persistLocalTvDiagnostics(tvDiagnosticsQueueRef.current)
+      scheduleLocalTvDiagnosticsPersist()
     } catch {
       tvDiagnosticsQueueRef.current.unshift(...events)
 
@@ -1496,6 +1525,8 @@ function TvApp() {
           tvDiagnosticsQueueRef.current.length - tvDiagnosticsMaxLocalEvents,
         )
       }
+
+      scheduleLocalTvDiagnosticsPersist()
     } finally {
       tvDiagnosticsInFlightRef.current = false
 
@@ -1510,33 +1541,37 @@ function TvApp() {
       return
     }
 
-    const events = tvDiagnosticsQueueRef.current.splice(
-      0,
-      tvDiagnosticsMaxBatchEvents,
-    )
-    const body = JSON.stringify({
-      clientId: playbackActivityClientIdRef.current,
-      events,
-      sessionId: tvDiagnosticsSessionId,
-    })
+    try {
+      const events = tvDiagnosticsQueueRef.current.splice(
+        0,
+        tvDiagnosticsMaxBatchEvents,
+      )
+      const body = JSON.stringify({
+        clientId: playbackActivityClientIdRef.current,
+        events,
+        sessionId: tvDiagnosticsSessionId,
+      })
 
-    const beaconQueued = navigator.sendBeacon
-      ? navigator.sendBeacon(buildApiUrl('/api/tv-diagnostics', apiBase), body)
-      : false
+      const beaconQueued = navigator.sendBeacon
+        ? navigator.sendBeacon(buildApiUrl('/api/tv-diagnostics', apiBase), body)
+        : false
 
-    if (!beaconQueued) {
-      void fetch(buildApiUrl('/api/tv-diagnostics', apiBase), {
-        body,
-        cache: 'no-store',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        keepalive: true,
-        method: 'POST',
-      }).catch(() => undefined)
+      if (!beaconQueued) {
+        void fetch(buildApiUrl('/api/tv-diagnostics', apiBase), {
+          body,
+          cache: 'no-store',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          keepalive: true,
+          method: 'POST',
+        }).catch(() => undefined)
+      }
+
+      scheduleLocalTvDiagnosticsPersist()
+    } catch {
+      // Pagehide telemetry is best-effort.
     }
-
-    persistLocalTvDiagnostics(tvDiagnosticsQueueRef.current)
   }
 
   useEffect(() => {
@@ -1577,6 +1612,11 @@ function TvApp() {
       if (tvDiagnosticsFlushTimeoutRef.current !== null) {
         window.clearTimeout(tvDiagnosticsFlushTimeoutRef.current)
         tvDiagnosticsFlushTimeoutRef.current = null
+      }
+
+      if (tvDiagnosticsLocalPersistTimeoutRef.current !== null) {
+        window.clearTimeout(tvDiagnosticsLocalPersistTimeoutRef.current)
+        tvDiagnosticsLocalPersistTimeoutRef.current = null
       }
 
       flushTvDiagnosticsBeacon()
@@ -2110,6 +2150,10 @@ function TvApp() {
   }
 
   function showPlayerBlackout() {
+    if (playerBlackoutVisible && playerEpisodeSwitchTargetId === null) {
+      return
+    }
+
     recordTvDiagnostic('blackout-show-request')
     setPlayerBlackoutVisible(true)
     setPlayerEpisodeSwitchTargetId(null)
@@ -2121,6 +2165,10 @@ function TvApp() {
   }
 
   function hidePlayerBlackout() {
+    if (!playerBlackoutVisible && playerEpisodeSwitchTargetId === null) {
+      return
+    }
+
     recordTvDiagnostic('blackout-hide-request')
     setPlayerBlackoutVisible(false)
     setPlayerEpisodeSwitchTargetId(null)
@@ -5815,18 +5863,29 @@ function getBrowserMemoryStats() {
     performance as Performance & {
       memory?: {
         jsHeapSizeLimit?: number
+        totalJSHeapSize?: number
         usedJSHeapSize?: number
       }
     }
   ).memory
+  const limitMiB = memory?.jsHeapSizeLimit
+    ? roundMetric(memory.jsHeapSizeLimit / (1024 * 1024), 1)
+    : null
+  const totalMiB = memory?.totalJSHeapSize
+    ? roundMetric(memory.totalJSHeapSize / (1024 * 1024), 1)
+    : null
+  const usedMiB = memory?.usedJSHeapSize
+    ? roundMetric(memory.usedJSHeapSize / (1024 * 1024), 1)
+    : null
 
   return {
-    limitMiB: memory?.jsHeapSizeLimit
-      ? roundMetric(memory.jsHeapSizeLimit / (1024 * 1024), 1)
-      : null,
-    usedMiB: memory?.usedJSHeapSize
-      ? roundMetric(memory.usedJSHeapSize / (1024 * 1024), 1)
-      : null,
+    limitMiB,
+    remainingMiB:
+      limitMiB === null || usedMiB === null
+        ? null
+        : roundMetric(Math.max(limitMiB - usedMiB, 0), 1),
+    totalMiB,
+    usedMiB,
   }
 }
 
