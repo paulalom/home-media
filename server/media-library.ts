@@ -512,6 +512,8 @@ let systemAwakeProcess: ChildProcess | null = null
 let systemAwakeRestartTimer: NodeJS.Timeout | null = null
 let systemAwakeStartErrorLogged = false
 const tvDiagnosticsEntries: TvDiagnosticEntry[] = []
+let tvDiagnosticsLoaded = false
+let tvDiagnosticsLoadPromise: Promise<void> | null = null
 let tvDiagnosticsWritePromise = Promise.resolve()
 const previewFrameFetches = new Map<string, Promise<string>>()
 const transcodeCacheEncodes = new Map<string, Promise<string>>()
@@ -806,6 +808,7 @@ export async function handleMediaApi(
 
   if (url.pathname === '/api/tv-diagnostics') {
     if (req.method === 'GET') {
+      await ensureTvDiagnosticEntriesLoaded()
       sendJson(res, getTvDiagnosticsStatus())
       return true
     }
@@ -3244,6 +3247,61 @@ function getTvDiagnosticsStatus() {
   }
 }
 
+async function ensureTvDiagnosticEntriesLoaded() {
+  if (tvDiagnosticsLoaded) {
+    return
+  }
+
+  if (!tvDiagnosticsLoadPromise) {
+    tvDiagnosticsLoadPromise = loadTvDiagnosticEntries()
+      .catch(() => undefined)
+      .finally(() => {
+        tvDiagnosticsLoaded = true
+        tvDiagnosticsLoadPromise = null
+      })
+  }
+
+  await tvDiagnosticsLoadPromise
+}
+
+async function loadTvDiagnosticEntries() {
+  const rawLog = await fs.readFile(getTvDiagnosticsLogPath(), 'utf8')
+  const parsedLog = JSON.parse(rawLog) as unknown
+  const rawEntries =
+    isRecord(parsedLog) && Array.isArray(parsedLog.entries)
+      ? parsedLog.entries
+      : []
+  const entries = rawEntries
+    .map(normalizeStoredTvDiagnosticEntry)
+    .filter((entry): entry is TvDiagnosticEntry => Boolean(entry))
+    .slice(-TV_DIAGNOSTICS_MAX_ENTRIES)
+
+  tvDiagnosticsEntries.splice(0, tvDiagnosticsEntries.length, ...entries)
+}
+
+function normalizeStoredTvDiagnosticEntry(
+  value: unknown,
+): TvDiagnosticEntry | null {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const rawSequence = value.sequence
+  const sequence =
+    typeof rawSequence === 'number' && Number.isFinite(rawSequence)
+      ? rawSequence
+      : null
+
+  return {
+    clientId: getTvDiagnosticString(value.clientId, 128) ?? 'unknown',
+    event: sanitizeTvDiagnosticValue(value.event),
+    receivedAt:
+      getTvDiagnosticString(value.receivedAt, 64) ?? new Date().toISOString(),
+    sequence,
+    sessionId: getTvDiagnosticString(value.sessionId, 128) ?? 'unknown',
+  }
+}
+
 function normalizeTvDiagnosticEntries(value: unknown): TvDiagnosticEntry[] {
   const batch = isRecord(value) ? value : {}
   const rawEvents = Array.isArray(batch.events) ? batch.events : [value]
@@ -3281,6 +3339,7 @@ async function addTvDiagnosticEntries(entries: TvDiagnosticEntry[]) {
     return
   }
 
+  await ensureTvDiagnosticEntriesLoaded()
   tvDiagnosticsEntries.push(...entries)
 
   if (tvDiagnosticsEntries.length > TV_DIAGNOSTICS_MAX_ENTRIES) {
@@ -3294,6 +3353,7 @@ async function addTvDiagnosticEntries(entries: TvDiagnosticEntry[]) {
 }
 
 async function clearTvDiagnosticEntries() {
+  tvDiagnosticsLoaded = true
   tvDiagnosticsEntries.splice(0)
   await saveTvDiagnosticEntries()
 }
