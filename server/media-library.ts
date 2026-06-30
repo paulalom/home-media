@@ -3331,12 +3331,12 @@ function sanitizeTvDiagnosticValue(value: unknown, depth = 0): unknown {
     return '[depth-limit]'
   }
 
-  if (
-    value === null ||
-    typeof value === 'boolean' ||
-    typeof value === 'number'
-  ) {
-    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  if (value === null || typeof value === 'boolean') {
+    return value
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null
   }
 
   if (typeof value === 'string') {
