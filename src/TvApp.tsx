@@ -986,7 +986,7 @@ function TvApp() {
             }
 
             void loadCachedScanPreviewVisual(
-              getScanPreviewVisualRequest(item, preview, apiBase),
+              getScanPreviewSpriteRequest(item, preview, apiBase),
             ).catch(() => undefined)
           }
         })
@@ -6441,17 +6441,25 @@ function getScanPreviewVisualRequest(
     preview.position,
     bucketSeconds,
   )
+  const url = getPreviewFrameUrl(item, apiBase, quality, framePosition)
 
-  if (!preview.scanning) {
-    const url = getPreviewFrameUrl(item, apiBase, quality, framePosition)
-
-    return {
-      key: `image:${url}`,
-      kind: 'image',
-      url,
-    }
+  return {
+    key: `image:${url}`,
+    kind: 'image',
+    url,
   }
+}
 
+function getScanPreviewSpriteRequest(
+  item: MediaItem,
+  preview: ScanPreview,
+  apiBase: string,
+): ScanPreviewVisualRequest {
+  const bucketSeconds = getScanPreviewFrameBucketSeconds(preview)
+  const framePosition = getScanPreviewFramePosition(
+    preview.position,
+    bucketSeconds,
+  )
   const url = getPreviewSpriteUrl(item, apiBase, framePosition)
 
   return {
