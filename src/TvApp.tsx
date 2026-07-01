@@ -1590,11 +1590,39 @@ function TvApp() {
       ui: {
         actionMenu: actionMenu?.kind ?? null,
         detailOpen: Boolean(detailTitle),
+        focus: {
+          area: safeFocus.area,
+          itemIndex: safeFocus.itemIndex,
+          sectionId: activeSection?.id ?? null,
+          sectionIndex: safeFocus.sectionIndex,
+          sectionLabel: activeSection?.label ?? null,
+        },
         htmlPlayerShouldAutoPlay,
         playerBlackoutVisible,
         playerHudVisible,
         scanPreview,
         scanPreviewVisibleVisualKind: scanPreviewVisibleVisual?.kind ?? null,
+        selectedDetail: detailTitle
+          ? {
+              id: detailTitle.id,
+              kind: detailTitle.kind,
+              title: detailTitle.title,
+            }
+          : null,
+        selectedItem: selectedItem
+          ? {
+              container: selectedItem.container,
+              id: selectedItem.id,
+              title: getItemDisplayTitle(selectedItem),
+            }
+          : null,
+        selectedTitle: selectedTitle
+          ? {
+              id: selectedTitle.id,
+              kind: selectedTitle.kind,
+              title: selectedTitle.title,
+            }
+          : null,
         shortSeekPreview,
         shortSeekPreviewVisibleVisualKind:
           shortSeekPreviewVisibleVisual?.kind ?? null,

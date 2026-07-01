@@ -65,6 +65,8 @@ This app is intended to run on TV hardware with limited CPU, memory, storage, ne
 - Treat DevTools/CDP access as opportunistic during native AVPlay validation. The emulator debug endpoint can become unavailable after native playback starts or after a debugger disconnect.
 - Prefer visible emulator-window captures plus `/api/playback-activity` for native playback evidence when CDP is unstable.
 - If `sdb shell input keyevent` does not move TV focus, send key messages to the emulator window and confirm movement with a window capture.
+- When CDP is unavailable, use `/api/tv-diagnostics` `ui.focus`, `ui.selectedTitle`, `ui.selectedItem`, and `ui.selectedDetail` to confirm remote-navigation state before pressing Enter.
+- On Windows, posting `WM_KEYDOWN`/`WM_KEYUP` to the `emulator-x86_64` `Tizen Emulator` window has been a reliable fallback for remote keys after `sdb shell input keyevent` is ignored.
 - During native playback, validate that `/api/playback-activity` stays active beyond the player startup fallback window and returns inactive after playback closes or the lease expires.
 - For the Samsung emulator profile reporting model `EMULATOR`, do not treat AVI/DIVX AVPlay as authoritative native-playback evidence. The emulator can reject or stall AVI AVPlay even when TV hardware may support the file. Emulator smoke tests should verify that these files stay responsive through the HTML/transcode path, that Back closes playback in one press, and that `/api/playback-activity` returns inactive within a few seconds.
 - Keep real-device native AVPlay validation as a separate check. For codec-sensitive files, record the container, video codec, audio codec, AVPlay event type, fallback reason, and whether the native surface clears after Back.
