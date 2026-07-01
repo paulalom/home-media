@@ -729,6 +729,32 @@ button {
   overflow: hidden;
   place-items: center;
   position: relative;
+  transform: translateZ(0);
+}
+
+.tv-action-menu,
+.tv-player-blackout,
+.tv-player-episode-switch,
+.tv-player-info,
+.tv-player-shell,
+.tv-scan-thumbnail,
+.tv-short-seek-preview {
+  backface-visibility: hidden;
+}
+
+.tv-ui-compositor-pulse {
+  animation: tv-ui-compositor-pulse 120ms steps(2, end);
+  filter: opacity(0.999);
+}
+
+@keyframes tv-ui-compositor-pulse {
+  from {
+    filter: opacity(0.999);
+  }
+
+  to {
+    filter: opacity(1);
+  }
 }
 
 .tv-player {

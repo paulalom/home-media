@@ -433,6 +433,8 @@ const tvDiagnosticsLocalPersistDelayMs = 5000
 const tvDiagnosticsMaxBatchEvents = 6
 const tvDiagnosticsMaxLocalEvents = 250
 const tvDiagnosticsStorageKey = 'my-home-media-server-tv-diagnostics-v1'
+const tvUiCompositorIdlePulseAfterMs = 2 * 60 * 1000
+const tvUiCompositorIdlePulseIntervalMs = 60_000
 const tvPlayerInputIdleRecoveryMs = 60_000
 const tvUiStallRecoveryCooldownMs = 15_000
 const tvUiStallRecoveryMs = 5_000
@@ -1738,6 +1740,50 @@ function TvApp() {
   ])
 
   useEffect(() => {
+    if (!activePlayerItemId || !isAppVisible) {
+      return
+    }
+
+    const intervalId = window.setInterval(() => {
+      const playbackPaused = playerPlaybackPausedRef.current
+
+      if (!playbackPaused) {
+        return
+      }
+
+      const now = getCurrentTimestamp()
+      const pausedForMs =
+        playerPausedAtRef.current === null
+          ? null
+          : Math.max(0, now - playerPausedAtRef.current)
+      const inputIdleMs = Math.max(0, now - tvLastPlayerInputAtRef.current)
+      const shouldPulse =
+        inputIdleMs >= tvUiCompositorIdlePulseAfterMs ||
+        (pausedForMs !== null &&
+          pausedForMs >= tvUiCompositorIdlePulseAfterMs)
+
+      if (!shouldPulse) {
+        return
+      }
+
+      const recoveryIndex = tvUiRecoveryCountRef.current + 1
+
+      tvUiRecoveryCountRef.current = recoveryIndex
+      pulseTvUiCompositor(recoveryIndex)
+      recordTvDiagnosticRef.current('ui-idle-compositor-pulse', {
+        inputIdleMs,
+        pausedForMs,
+        playbackPaused,
+        recoveryIndex,
+      })
+    }, tvUiCompositorIdlePulseIntervalMs)
+
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [activePlayerItemId, isAppVisible])
+
+  useEffect(() => {
     if (!activePlayerItemId) {
       return
     }
@@ -2444,14 +2490,25 @@ function TvApp() {
     }
 
     if (playerEngine === 'avplay') {
+      const recoveryIndex = tvUiRecoveryCountRef.current + 1
+
+      tvUiRecoveryCountRef.current = recoveryIndex
       recordTvDiagnostic('long-pause-recover-avplay', {
         action,
+        recoveryIndex,
         snapshot,
       }, {
         includeDom: true,
         immediate: true,
       })
       refreshAvPlayPausedSurface(snapshot)
+      pulseTvUiCompositor(recoveryIndex)
+      recordTvDiagnosticAfterPaint('long-pause-recover-avplay-after-paint', {
+        recoveryIndex,
+      }, {
+        includeDom: true,
+        immediate: true,
+      })
       return false
     }
 
@@ -2661,7 +2718,10 @@ function TvApp() {
 
     const applyRecoveryState = () => {
       if (liveSnapshot) {
-        tvLastClockUpdateAtRef.current = getCurrentTimestamp()
+        const recoveryRenderAt = getCurrentTimestamp()
+
+        tvLastClockRenderAtRef.current = recoveryRenderAt
+        tvLastClockUpdateAtRef.current = recoveryRenderAt
         setPlayerClock({
           duration: liveSnapshot.duration,
           position: liveSnapshot.position,
@@ -7237,23 +7297,60 @@ function getObjectTypeName(value: object) {
 function pulseTvUiCompositor(recoveryIndex: number) {
   try {
     const pulseValue = String(recoveryIndex)
-    const elements: (HTMLElement | null)[] = [
-      document.documentElement,
-      document.body,
-      document.querySelector<HTMLElement>('.tv-player-shell'),
-      document.querySelector<HTMLElement>('.tv-player-info'),
+    const pulseClassName = 'tv-ui-compositor-pulse'
+    const elements = new Set<HTMLElement>()
+    const addElement = (element: HTMLElement | null) => {
+      if (element) {
+        elements.add(element)
+      }
+    }
+    const selectors = [
+      '.tv-action-menu',
+      '.tv-player-blackout',
+      '.tv-player-episode-switch',
+      '.tv-player-info',
+      '.tv-player-shell',
+      '.tv-scan-thumbnail',
+      '.tv-short-seek-preview',
     ]
 
-    for (const element of elements) {
-      if (!element) {
-        continue
-      }
+    addElement(document.documentElement)
+    addElement(document.body)
 
+    for (const selector of selectors) {
+      for (const element of document.querySelectorAll<HTMLElement>(selector)) {
+        addElement(element)
+      }
+    }
+
+    for (const element of elements) {
+      element.classList.remove(pulseClassName)
       element.dataset.tvUiRecoveryPulse = pulseValue
       element.style.setProperty('--tv-ui-recovery-pulse', pulseValue)
     }
 
-    void document.body.offsetHeight
+    void document.body?.offsetHeight
+
+    for (const element of elements) {
+      element.classList.add(pulseClassName)
+    }
+
+    void document.body?.offsetHeight
+
+    const clearPulse = () => {
+      for (const element of elements) {
+        element.classList.remove(pulseClassName)
+      }
+    }
+
+    if (typeof window.requestAnimationFrame === 'function') {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(clearPulse)
+      })
+      return
+    }
+
+    window.setTimeout(clearPulse, 120)
   } catch {
     // Compositor nudges are best-effort and must never affect playback.
   }
