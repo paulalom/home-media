@@ -85,6 +85,15 @@ type LibraryResponse = {
   items: MediaItem[]
 }
 
+type MediaTranscodeCacheStatus = {
+  cached: boolean
+  mediaId: string
+  sizeBytes: number
+  sizeLabel: string
+  state: 'encoding' | 'missing' | 'ready'
+  updatedAt: string
+}
+
 type TvTitle = {
   id: string
   kind: 'movie' | 'show'
@@ -120,6 +129,12 @@ type DetailState = {
 type PlayerClock = {
   duration: number
   position: number
+}
+
+type PlayerTranscodePreparation = {
+  error?: string
+  itemId: string
+  state: 'failed' | 'preparing'
 }
 
 type PendingPlaybackSeek = {
@@ -518,6 +533,30 @@ async function fetchLibrary(apiBase: string, signal?: AbortSignal) {
   return (await response.json()) as LibraryResponse
 }
 
+async function prepareTranscodedMedia(
+  apiBase: string,
+  mediaId: string,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(
+    buildApiUrl(
+      `/api/media/${encodeURIComponent(mediaId)}/transcode-cache`,
+      apiBase,
+    ),
+    {
+      cache: 'no-store',
+      method: 'POST',
+      signal,
+    },
+  )
+
+  if (!response.ok) {
+    throw new Error(`Transcode preparation failed (${response.status})`)
+  }
+
+  return (await response.json()) as MediaTranscodeCacheStatus
+}
+
 async function fetchServerConnection(apiBase: string, signal?: AbortSignal) {
   const response = await fetch(buildApiUrl('/api/client-profile', apiBase), {
     cache: 'no-store',
@@ -571,6 +610,11 @@ function TvApp() {
   const [playerItem, setPlayerItem] = useState<MediaItem | null>(null)
   const [playerPlaybackPaused, setPlayerPlaybackPaused] = useState(true)
   const [playerStatus, setPlayerStatus] = useState<string | null>(null)
+  const [playerTranscodePreparation, setPlayerTranscodePreparation] =
+    useState<PlayerTranscodePreparation | null>(null)
+  const [preparedTranscodeById, setPreparedTranscodeById] = useState<
+    Record<string, true>
+  >({})
   const [playbackStrategyById, setPlaybackStrategyById] = useState<
     Record<string, PlaybackStrategy>
   >({})
@@ -605,6 +649,7 @@ function TvApp() {
   const lastUnreliablePlaybackDurationDiagnosticRef = useRef<
     Record<string, number>
   >({})
+  const playerTranscodePreparationRunRef = useRef(0)
   const pendingHtmlResumePositionRef = useRef(0)
   const pendingHtmlResumeShouldPlayRef = useRef(true)
   const avPlayPlaybackRef = useRef<AvPlayPlaybackSnapshot>({
@@ -1408,6 +1453,19 @@ function TvApp() {
   const playerEngine = playerItem
     ? getPlaybackEngine(playerItem, playerPlaybackStrategy, clientProfile)
     : 'html'
+  const playerNeedsPreparedTranscode = playerItem
+    ? shouldPrepareTranscodeBeforePlayback(
+        playerItem,
+        playerPlaybackStrategy,
+        clientProfile,
+      )
+    : false
+  const playerPreparedTranscodeReady = playerItem
+    ? preparedTranscodeById[playerItem.id] === true
+    : false
+  const shouldRenderHtmlPlayer =
+    playerEngine === 'html' &&
+    (!playerNeedsPreparedTranscode || playerPreparedTranscodeReady)
   const activePlayerItemId = playerItem?.id ?? null
   const shouldKeepTvPlayerAwake = Boolean(
     activePlayerItemId &&
@@ -1875,6 +1933,113 @@ function TvApp() {
       )
     }
   }, [activePlayerItemId, apiBase])
+
+  useEffect(() => {
+    if (
+      !playerItem ||
+      !playerNeedsPreparedTranscode ||
+      playerPreparedTranscodeReady
+    ) {
+      return
+    }
+
+    const item = playerItem
+    const controller = new AbortController()
+    const runId = playerTranscodePreparationRunRef.current + 1
+
+    playerTranscodePreparationRunRef.current = runId
+    pendingHtmlResumeShouldPlayRef.current = true
+    const startStateTimeout = window.setTimeout(() => {
+      if (
+        controller.signal.aborted ||
+        playerTranscodePreparationRunRef.current !== runId ||
+        playerItemRef.current?.id !== item.id
+      ) {
+        return
+      }
+
+      setHtmlPlayerShouldAutoPlay(false)
+      setPlayerStatus('Preparing transcode')
+      setPlayerTranscodePreparation({
+        itemId: item.id,
+        state: 'preparing',
+      })
+      recordTvDiagnosticRef.current('transcode-cache-prepare-start', {
+        itemId: item.id,
+        title: getItemDisplayTitle(item),
+      }, {
+        immediate: true,
+      })
+    }, 0)
+
+    prepareTranscodedMedia(apiBase, item.id, controller.signal)
+      .then((status) => {
+        window.clearTimeout(startStateTimeout)
+
+        if (
+          controller.signal.aborted ||
+          playerTranscodePreparationRunRef.current !== runId ||
+          playerItemRef.current?.id !== item.id
+        ) {
+          return
+        }
+
+        setPreparedTranscodeById((currentPrepared) => ({
+          ...currentPrepared,
+          [item.id]: true,
+        }))
+        setPlayerTranscodePreparation(null)
+        setPlayerStatus(getPlaybackStatusLabel(item, playerPlaybackStrategy))
+        setHtmlPlayerShouldAutoPlay(true)
+        setHtmlPlayerSurfaceVersion((currentVersion) => currentVersion + 1)
+        recordTvDiagnosticRef.current('transcode-cache-prepare-ready', {
+          itemId: item.id,
+          sizeBytes: status.sizeBytes,
+          sizeLabel: status.sizeLabel,
+          title: getItemDisplayTitle(item),
+        }, {
+          immediate: true,
+        })
+      })
+      .catch((error: unknown) => {
+        window.clearTimeout(startStateTimeout)
+
+        if (
+          controller.signal.aborted ||
+          playerTranscodePreparationRunRef.current !== runId ||
+          playerItemRef.current?.id !== item.id
+        ) {
+          return
+        }
+
+        const message = getErrorMessage(error)
+
+        setPlayerTranscodePreparation({
+          error: message,
+          itemId: item.id,
+          state: 'failed',
+        })
+        setPlayerStatus('Transcode preparation failed')
+        recordTvDiagnosticRef.current('transcode-cache-prepare-failed', {
+          error: message,
+          itemId: item.id,
+          title: getItemDisplayTitle(item),
+        }, {
+          immediate: true,
+        })
+      })
+
+    return () => {
+      window.clearTimeout(startStateTimeout)
+      controller.abort()
+    }
+  }, [
+    apiBase,
+    playerItem,
+    playerNeedsPreparedTranscode,
+    playerPlaybackStrategy,
+    playerPreparedTranscodeReady,
+  ])
 
   useEffect(() => {
     if (safeFocus.area !== 'rows') {
@@ -3249,6 +3414,7 @@ function TvApp() {
 
     playbackActivityCleanupStateRef.current = 'closed'
     playerItemRef.current = null
+    playerTranscodePreparationRunRef.current += 1
     void reportPlaybackActivity(
       apiBase,
       playbackActivityClientIdRef.current,
@@ -3269,6 +3435,7 @@ function TvApp() {
     markPlayerActive()
     pendingHtmlResumeShouldPlayRef.current = true
     setHtmlPlayerShouldAutoPlay(true)
+    setPlayerTranscodePreparation(null)
     setPlayerStatus(null)
 
     try {
@@ -4649,10 +4816,16 @@ function TvApp() {
   })
 
   if (playerItem) {
+    const activeTranscodePreparation =
+      playerTranscodePreparation?.itemId === playerItem.id
+        ? playerTranscodePreparation
+        : null
     const playerInfoClassName = [
       'tv-player-info',
       scanPreview ? 'scanning' : '',
-      playerHudVisible || scanPreview ? '' : 'hidden',
+      playerHudVisible || scanPreview || activeTranscodePreparation
+        ? ''
+        : 'hidden',
     ]
       .filter(Boolean)
       .join(' ')
@@ -4672,7 +4845,7 @@ function TvApp() {
         className="tv-player-shell"
         key={`player-shell:${playerItem.id}:${playerPlaybackStrategy}:${playerShellSurfaceVersion}`}
       >
-        {playerEngine === 'html' ? (
+        {shouldRenderHtmlPlayer ? (
           <video
             autoPlay={htmlPlayerShouldAutoPlay}
             className="tv-player"
@@ -4774,6 +4947,8 @@ function TvApp() {
               clientProfile,
             )}
           />
+        ) : playerEngine === 'html' ? (
+          <div className="tv-player" aria-hidden="true" />
         ) : (
           <object
             aria-hidden="true"
@@ -6092,6 +6267,18 @@ function getPlaybackEngine(
   }
 
   return 'html'
+}
+
+function shouldPrepareTranscodeBeforePlayback(
+  item: MediaItem,
+  strategy: PlaybackStrategy,
+  clientProfile?: ClientDeviceProfile,
+) {
+  return (
+    strategy === 'transcode' &&
+    !item.browserPlayable &&
+    isSamsungTvEmulator(clientProfile)
+  )
 }
 
 function isTvNativePlaybackCandidate(

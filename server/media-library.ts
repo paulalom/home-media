@@ -193,6 +193,15 @@ type TranscodeCacheStatus = {
   updatedAt: string
 }
 
+type MediaTranscodeCacheStatus = {
+  cached: boolean
+  mediaId: string
+  sizeBytes: number
+  sizeLabel: string
+  state: 'encoding' | 'missing' | 'ready'
+  updatedAt: string
+}
+
 type ClientVideoProbe = {
   label: string
   mimeType: string
@@ -775,7 +784,7 @@ export async function handleMediaApi(
     url.pathname === '/api/transcode-cache' ||
     /^\/api\/files\/[^/]+\/download$/.test(url.pathname) ||
     /^\/api\/playback\/[^/]+$/.test(url.pathname) ||
-    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|preview-sheet|preview-sprite|transcode)$/.test(
+    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|preview-sheet|preview-sprite|transcode|transcode-cache)$/.test(
       url.pathname,
     ) ||
     /^\/api\/media\/[^/]+\/stream(?:\/[^/]+)?$/.test(url.pathname)
@@ -1071,6 +1080,36 @@ export async function handleMediaApi(
       await streamMedia(streamMatch[1], req, res)
     } catch (error) {
       sendError(res, 500, getErrorMessage(error))
+    }
+
+    return true
+  }
+
+  const mediaTranscodeCacheMatch =
+    /^\/api\/media\/([^/]+)\/transcode-cache$/.exec(url.pathname)
+
+  if (mediaTranscodeCacheMatch) {
+    if (req.method !== 'GET' && req.method !== 'POST') {
+      sendMethodNotAllowed(res, ['GET', 'POST'])
+      return true
+    }
+
+    try {
+      const target = await getTranscodeTarget(mediaTranscodeCacheMatch[1])
+
+      if (req.method === 'POST') {
+        await trackActiveTranscodeCacheWarm(encodeTranscodeCacheFile(target))
+      }
+
+      sendJson(
+        res,
+        await getMediaTranscodeCacheStatus(
+          decodeUrlSegment(mediaTranscodeCacheMatch[1]) ?? mediaTranscodeCacheMatch[1],
+          target,
+        ),
+      )
+    } catch (error) {
+      sendError(res, getErrorStatusCode(error), getErrorMessage(error))
     }
 
     return true
@@ -1596,6 +1635,35 @@ async function getTranscodeCacheStatus(): Promise<TranscodeCacheStatus> {
     cacheFiles: directoryStats.files,
     cacheRoot: getTranscodeCacheRoot(),
     cacheSizeLabel: formatBytes(directoryStats.bytes),
+  }
+}
+
+async function getMediaTranscodeCacheStatus(
+  mediaId: string,
+  target: TranscodeTarget,
+): Promise<MediaTranscodeCacheStatus> {
+  if (await isFile(target.cachePath)) {
+    const stats = await fs.stat(target.cachePath)
+
+    return {
+      cached: true,
+      mediaId,
+      sizeBytes: stats.size,
+      sizeLabel: formatBytes(stats.size),
+      state: 'ready',
+      updatedAt: new Date().toISOString(),
+    }
+  }
+
+  const isEncoding = transcodeCacheEncodes.has(target.cachePath)
+
+  return {
+    cached: false,
+    mediaId,
+    sizeBytes: 0,
+    sizeLabel: formatBytes(0),
+    state: isEncoding ? 'encoding' : 'missing',
+    updatedAt: new Date().toISOString(),
   }
 }
 
