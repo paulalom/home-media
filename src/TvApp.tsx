@@ -615,6 +615,9 @@ function TvApp() {
   const [preparedTranscodeById, setPreparedTranscodeById] = useState<
     Record<string, true>
   >({})
+  const [htmlDirectFallbackById, setHtmlDirectFallbackById] = useState<
+    Record<string, true>
+  >({})
   const [playbackStrategyById, setPlaybackStrategyById] = useState<
     Record<string, PlaybackStrategy>
   >({})
@@ -1450,8 +1453,16 @@ function TvApp() {
   const playerPlaybackStrategy = playerItem
     ? getPlaybackStrategy(playerItem, playbackStrategyById, clientProfile)
     : 'native'
+  const playerUsesHtmlDirectFallback = playerItem
+    ? htmlDirectFallbackById[playerItem.id] === true
+    : false
   const playerEngine = playerItem
-    ? getPlaybackEngine(playerItem, playerPlaybackStrategy, clientProfile)
+    ? getPlaybackEngine(
+        playerItem,
+        playerPlaybackStrategy,
+        clientProfile,
+        playerUsesHtmlDirectFallback,
+      )
     : 'html'
   const playerNeedsPreparedTranscode = playerItem
     ? shouldPrepareTranscodeBeforePlayback(
@@ -1564,6 +1575,7 @@ function TvApp() {
         avPlayState: safelyReadString(() => avPlay?.getState?.()),
         currentSrc: player?.currentSrc,
         htmlAutoPlay: htmlPlayerShouldAutoPlay,
+        htmlDirectFallback: playerUsesHtmlDirectFallback,
         htmlNetworkState: player?.networkState,
         htmlReadyState: player?.readyState,
         htmlSurfaceVersion: htmlPlayerSurfaceVersion,
@@ -3061,7 +3073,7 @@ function TvApp() {
     const avPlay = getAvPlay()
 
     if (!avPlay) {
-      fallbackPlayerToTranscode(item, 'AVPlay unavailable')
+      fallbackPlayerToCompatiblePlayback(item, 'AVPlay unavailable')
       return
     }
 
@@ -3107,7 +3119,7 @@ function TvApp() {
       }, {
         immediate: true,
       })
-      fallbackPlayerToTranscode(item, reason)
+      fallbackPlayerToCompatiblePlayback(item, reason)
     }
 
     try {
@@ -3242,7 +3254,7 @@ function TvApp() {
         }, {
           immediate: true,
         })
-        fallbackPlayerToTranscode(item, getErrorMessage(error))
+        fallbackPlayerToCompatiblePlayback(item, getErrorMessage(error))
       }
     }
 
@@ -3326,7 +3338,14 @@ function TvApp() {
   }
 
   function hasNativePlaybackStarted(item: MediaItem) {
-    if (getPlaybackEngine(item, 'native', clientProfile) === 'avplay') {
+    if (
+      getPlaybackEngine(
+        item,
+        'native',
+        clientProfile,
+        htmlDirectFallbackById[item.id] === true,
+      ) === 'avplay'
+    ) {
       return avPlayPlaybackRef.current.itemId === item.id
         ? avPlayPlaybackRef.current.position > 0.25
         : false
@@ -3340,7 +3359,15 @@ function TvApp() {
 
     clearPlayerStartupTimeout()
 
-    if (strategy !== 'native' || item.browserPlayable) {
+    if (
+      strategy !== 'native' ||
+      getPlaybackEngine(
+        item,
+        'native',
+        clientProfile,
+        htmlDirectFallbackById[item.id] === true,
+      ) !== 'avplay'
+    ) {
       return
     }
 
@@ -3353,11 +3380,54 @@ function TvApp() {
         return
       }
 
-      fallbackPlayerToTranscode(item, 'Native playback stalled')
+      fallbackPlayerToCompatiblePlayback(item, 'Native playback stalled')
     }, playerNativeStartupTimeoutMs)
   }
 
+  function fallbackPlayerToCompatiblePlayback(item: MediaItem, reason: string) {
+    if (item.browserPlayable) {
+      fallbackPlayerToHtmlDirect(item, reason)
+      return
+    }
+
+    fallbackPlayerToTranscode(item, reason)
+  }
+
+  function fallbackPlayerToHtmlDirect(item: MediaItem, reason: string) {
+    const resumePosition = readActivePlaybackSnapshot()?.position ?? 0
+
+    clearPlayerStartupTimeout()
+    stopAvPlayPlayback()
+    pendingHtmlResumePositionRef.current = resumePosition
+    pendingHtmlResumeShouldPlayRef.current = true
+    setHtmlPlayerShouldAutoPlay(true)
+    setPlayerStatus(`${reason}; switching to direct stream`)
+    setPlaybackStrategyById((currentStrategies) => ({
+      ...currentStrategies,
+      [item.id]: 'native',
+    }))
+    setHtmlDirectFallbackById((currentFallbacks) => ({
+      ...currentFallbacks,
+      [item.id]: true,
+    }))
+
+    window.setTimeout(() => {
+      const player = playerRef.current
+
+      if (!player) {
+        return
+      }
+
+      void player.play().catch(() => undefined)
+    }, 0)
+  }
+
   function fallbackPlayerToTranscode(item: MediaItem, reason: string) {
+    if (item.browserPlayable) {
+      fallbackPlayerToHtmlDirect(item, reason)
+      return
+    }
+
     if (getPlaybackStrategy(item, playbackStrategyById, clientProfile) === 'transcode') {
       return
     }
@@ -4194,7 +4264,7 @@ function TvApp() {
         markPlayerActive()
         startAvPlayProgressInterval(playerItem)
       } catch (error) {
-        fallbackPlayerToTranscode(playerItem, getErrorMessage(error))
+        fallbackPlayerToCompatiblePlayback(playerItem, getErrorMessage(error))
       }
       return
     }
@@ -4259,7 +4329,7 @@ function TvApp() {
       try {
         avPlay.seekTo?.(Math.round(clampedPosition * 1000))
       } catch (error) {
-        fallbackPlayerToTranscode(item, getErrorMessage(error))
+        fallbackPlayerToCompatiblePlayback(item, getErrorMessage(error))
       }
       return
     }
@@ -4897,7 +4967,16 @@ function TvApp() {
             }}
             onError={() => {
               if (playerPlaybackStrategy === 'native') {
-                fallbackPlayerToTranscode(playerItem, 'Native playback failed')
+                if (playerItem.browserPlayable) {
+                  clearPlayerStartupTimeout()
+                  setPlayerStatus('Direct stream playback failed')
+                  return
+                }
+
+                fallbackPlayerToCompatiblePlayback(
+                  playerItem,
+                  'Native playback failed',
+                )
                 return
               }
 
@@ -6284,10 +6363,11 @@ function getPlaybackEngine(
   item: MediaItem,
   strategy: PlaybackStrategy,
   clientProfile?: ClientDeviceProfile,
+  useHtmlDirectFallback = false,
 ): PlayerEngine {
   if (
     strategy === 'native' &&
-    !item.browserPlayable &&
+    !useHtmlDirectFallback &&
     isTvNativePlaybackCandidate(item, clientProfile) &&
     Boolean((window as MyHomeMediaServerWindow).webapis?.avplay)
   ) {

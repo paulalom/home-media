@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true, Position = 0)]
-  [ValidateSet('Back', 'Down', 'Enter', 'Escape', 'Left', 'Pause', 'Play', 'PlayPause', 'Right', 'Up')]
+  [Parameter(Mandatory = $true, Position = 0, ValueFromRemainingArguments = $true)]
   [string[]]$Key,
 
   [int]$DelayMs = 650,
@@ -56,6 +55,10 @@ $WM_KEYDOWN = 0x0100
 $WM_KEYUP = 0x0101
 
 foreach ($name in $Key) {
+  if (-not $virtualKeys.ContainsKey($name)) {
+    throw "Unsupported key '$name'. Valid keys: $($virtualKeys.Keys -join ', ')."
+  }
+
   $virtualKey = [int]$virtualKeys[$name]
 
   [HomeMediaEmulatorInput]::PostMessage(
