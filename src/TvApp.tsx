@@ -468,6 +468,7 @@ const tvNativePlaybackContainers = new Set([
   'WEBM',
   'WMV',
 ])
+const tvEmulatorAvPlayBlockedContainers = new Set(['AVI', 'DIVX'])
 const clientVideoProbeMimeTypes: ClientVideoProbe[] = [
   {
     label: 'MP4 H.264/AAC',
@@ -581,6 +582,9 @@ function TvApp() {
     useState<ScanPreviewVisual | null>(null)
   const [resumeRefreshKey, setResumeRefreshKey] = useState(0)
   const playbackHistoryRef = useRef(playbackHistory)
+  const actionMenuRef = useRef<ActionMenuState | null>(null)
+  const detailTitleRef = useRef<TvTitle | null>(null)
+  const playerItemRef = useRef<MediaItem | null>(null)
   const playbackActivityClientIdRef = useRef(readPlaybackActivityClientId())
   const playbackActivityCleanupStateRef =
     useRef<PlaybackActivityState>('closed')
@@ -591,6 +595,7 @@ function TvApp() {
       options?: TvDiagnosticOptions,
     ) => void
   >(() => undefined)
+  const pendingPlayerCloseDiagnosticRef = useRef<TvDiagnosticDetail | null>(null)
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
@@ -1392,16 +1397,22 @@ function TvApp() {
     playerEpisodeSwitchOptions.previous || playerEpisodeSwitchOptions.next,
   )
   const playerPlaybackStrategy = playerItem
-    ? getPlaybackStrategy(playerItem, playbackStrategyById)
+    ? getPlaybackStrategy(playerItem, playbackStrategyById, clientProfile)
     : 'native'
   const playerEngine = playerItem
-    ? getPlaybackEngine(playerItem, playerPlaybackStrategy)
+    ? getPlaybackEngine(playerItem, playerPlaybackStrategy, clientProfile)
     : 'html'
   const activePlayerItemId = playerItem?.id ?? null
   const shouldKeepTvPlayerAwake = Boolean(
     activePlayerItemId &&
       (!playerPlaybackPaused || preventSleepWhilePaused),
   )
+
+  useEffect(() => {
+    actionMenuRef.current = actionMenu
+    detailTitleRef.current = detailTitle
+    playerItemRef.current = playerItem
+  }, [actionMenu, detailTitle, playerItem])
 
   function recordTvDiagnostic(
     kind: string,
@@ -1662,6 +1673,19 @@ function TvApp() {
 
   useEffect(() => {
     recordTvDiagnosticRef.current = recordTvDiagnostic
+  })
+
+  useEffect(() => {
+    if (playerItem || !pendingPlayerCloseDiagnosticRef.current) {
+      return
+    }
+
+    const detail = pendingPlayerCloseDiagnosticRef.current
+    pendingPlayerCloseDiagnosticRef.current = null
+    recordTvDiagnosticRef.current('player-close-state-cleared', detail, {
+      immediate: true,
+      includeDom: true,
+    })
   })
 
   useEffect(() => {
@@ -2106,7 +2130,7 @@ function TvApp() {
         return
       }
 
-      closePlayer()
+      closePlayer('player-back')
       return
     }
 
@@ -2853,15 +2877,37 @@ function TvApp() {
       position: 0,
     }
 
-    const playbackUrl = getPlaybackStreamUrl(item, apiBase, 'native')
+    const playbackUrl = getPlaybackStreamUrl(item, apiBase, 'native', clientProfile)
 
     setPlayerStatus('AVPlay native direct play')
+    recordTvDiagnostic('avplay-start-request', {
+      avPlayState: safelyReadString(() => avPlay.getState?.()),
+      container: item.container,
+      itemId: item.id,
+      playbackUrl,
+    }, {
+      immediate: true,
+    })
 
-    const failAvPlay = (reason: string) => {
+    const failAvPlay = (
+      reason: string,
+      detail: TvDiagnosticDetail = {},
+    ) => {
       if (avPlayPlaybackRef.current.itemId !== item.id) {
         return
       }
 
+      recordTvDiagnostic('avplay-failure', {
+        ...detail,
+        avPlayCurrentTime: getAvPlayCurrentTime(avPlay),
+        avPlayDuration: getAvPlayDuration(avPlay),
+        avPlayState: safelyReadString(() => avPlay.getState?.()),
+        playbackRef: avPlayPlaybackRef.current,
+        playbackUrl,
+        reason,
+      }, {
+        immediate: true,
+      })
       fallbackPlayerToTranscode(item, reason)
     }
 
@@ -2886,9 +2932,22 @@ function TvApp() {
         oncurrentplaytime: (currentTimeMs) => {
           updateAvPlayClock(item, currentTimeMs / 1000)
         },
-        onerror: () => failAvPlay('AVPlay failed'),
-        onerrormsg: (_eventType, eventMessage) => {
-          failAvPlay(eventMessage || 'AVPlay failed')
+        onerror: (eventType) => failAvPlay(getAvPlayErrorReason(eventType), {
+          eventType,
+          source: 'onerror',
+        }),
+        onerrormsg: (eventType, eventMessage) => {
+          failAvPlay(getAvPlayErrorReason(eventType, eventMessage), {
+            eventMessage,
+            eventType,
+            source: 'onerrormsg',
+          })
+        },
+        onevent: (eventType, eventData) => {
+          recordTvDiagnostic('avplay-event', {
+            eventData,
+            eventType,
+          })
         },
         onstreamcompleted: () => {
           const snapshot = readActivePlaybackSnapshot()
@@ -2916,10 +2975,15 @@ function TvApp() {
       armNativePlaybackFallback(item)
       avPlay.prepareAsync(
         () => finishAvPlayPrepare(item, avPlay),
-        () => failAvPlay('AVPlay prepare failed'),
+        (error) => failAvPlay('AVPlay prepare failed', {
+          error: getErrorMessage(error),
+          source: 'prepareAsync',
+        }),
       )
     } catch (error) {
-      failAvPlay(getErrorMessage(error))
+      failAvPlay(getErrorMessage(error), {
+        source: 'startAvPlayPlayback',
+      })
     }
   }
 
@@ -2933,6 +2997,14 @@ function TvApp() {
       playbackHistoryRef.current[item.id] ?? null,
       duration,
     )
+
+    recordTvDiagnostic('avplay-prepare-success', {
+      avPlayState: safelyReadString(() => avPlay.getState?.()),
+      duration,
+      resumePosition,
+    }, {
+      immediate: true,
+    })
 
     avPlayPlaybackRef.current = {
       ...avPlayPlaybackRef.current,
@@ -2957,15 +3029,44 @@ function TvApp() {
         setPlayerStatus('AVPlay native direct play')
         startAvPlayProgressInterval(item)
         showPlayerHud(true)
+        recordTvDiagnostic('avplay-play-success', {
+          avPlayState: safelyReadString(() => avPlay.getState?.()),
+          duration: avPlayPlaybackRef.current.duration,
+          position: avPlayPlaybackRef.current.position,
+        }, {
+          immediate: true,
+        })
       } catch (error) {
+        recordTvDiagnostic('avplay-play-failed', {
+          avPlayState: safelyReadString(() => avPlay.getState?.()),
+          error: getErrorMessage(error),
+        }, {
+          immediate: true,
+        })
         fallbackPlayerToTranscode(item, getErrorMessage(error))
       }
     }
 
     if (resumePosition > 0 && avPlay.seekTo) {
       try {
-        avPlay.seekTo(Math.round(resumePosition * 1000), playPrepared, playPrepared)
-      } catch {
+        avPlay.seekTo(Math.round(resumePosition * 1000), playPrepared, (error) => {
+          recordTvDiagnostic('avplay-seek-failed', {
+            avPlayState: safelyReadString(() => avPlay.getState?.()),
+            error: getErrorMessage(error),
+            resumePosition,
+          }, {
+            immediate: true,
+          })
+          playPrepared()
+        })
+      } catch (error) {
+        recordTvDiagnostic('avplay-seek-threw', {
+          avPlayState: safelyReadString(() => avPlay.getState?.()),
+          error: getErrorMessage(error),
+          resumePosition,
+        }, {
+          immediate: true,
+        })
         playPrepared()
       }
       return
@@ -3026,7 +3127,7 @@ function TvApp() {
   }
 
   function hasNativePlaybackStarted(item: MediaItem) {
-    if (getPlaybackEngine(item, 'native') === 'avplay') {
+    if (getPlaybackEngine(item, 'native', clientProfile) === 'avplay') {
       return avPlayPlaybackRef.current.itemId === item.id
         ? avPlayPlaybackRef.current.position > 0.25
         : false
@@ -3036,7 +3137,7 @@ function TvApp() {
   }
 
   function armNativePlaybackFallback(item: MediaItem) {
-    const strategy = getPlaybackStrategy(item, playbackStrategyById)
+    const strategy = getPlaybackStrategy(item, playbackStrategyById, clientProfile)
 
     clearPlayerStartupTimeout()
 
@@ -3058,7 +3159,7 @@ function TvApp() {
   }
 
   function fallbackPlayerToTranscode(item: MediaItem, reason: string) {
-    if (getPlaybackStrategy(item, playbackStrategyById) === 'transcode') {
+    if (getPlaybackStrategy(item, playbackStrategyById, clientProfile) === 'transcode') {
       return
     }
 
@@ -3091,7 +3192,7 @@ function TvApp() {
       return
     }
 
-    const strategy = getInitialPlaybackStrategy(item)
+    const strategy = getInitialPlaybackStrategy(item, clientProfile)
 
     clearScanPreview()
     clearScanPreviewImages()
@@ -3113,17 +3214,47 @@ function TvApp() {
       [item.id]: strategy,
     }))
     playbackActivityCleanupStateRef.current = 'closed'
+    playerItemRef.current = item
     setPlayerItem(item)
   }
 
-  function closePlayer() {
-    if (playerItem) {
-      recordActivePlayback(playerItem, true)
+  function closePlayer(reason = 'unknown') {
+    const currentPlayerItem = playerItemRef.current ?? playerItem
+    const detail = {
+      hasPlayerItemRef: Boolean(playerItemRef.current),
+      hasPlayerItemState: Boolean(playerItem),
+      itemId: currentPlayerItem?.id ?? null,
+      itemTitle: currentPlayerItem ? getItemDisplayTitle(currentPlayerItem) : null,
+      reason,
+      scanPreviewRefActive: Boolean(playerScanPreviewRef.current),
+      scanPreviewStateActive: Boolean(scanPreview),
+    }
+
+    pendingPlayerCloseDiagnosticRef.current = detail
+    recordTvDiagnostic('player-close-request', detail, {
+      immediate: true,
+      includeDom: true,
+    })
+
+    if (currentPlayerItem) {
+      recordActivePlayback(currentPlayerItem, true)
       pauseActivePlayback()
     }
 
     playbackActivityCleanupStateRef.current = 'closed'
-    stopAvPlayPlayback()
+    playerItemRef.current = null
+    void reportPlaybackActivity(
+      apiBase,
+      playbackActivityClientIdRef.current,
+      currentPlayerItem?.id ?? null,
+      'closed',
+    ).catch(() => undefined)
+    sendPlaybackActivityBeacon(
+      apiBase,
+      playbackActivityClientIdRef.current,
+      currentPlayerItem?.id ?? null,
+      'closed',
+    )
     clearScanPreview()
     clearScanPreviewImages()
     clearPlayerHudTimeout()
@@ -3133,7 +3264,18 @@ function TvApp() {
     pendingHtmlResumeShouldPlayRef.current = true
     setHtmlPlayerShouldAutoPlay(true)
     setPlayerStatus(null)
-    setPlayerItem(null)
+
+    try {
+      flushSync(() => {
+        setPlayerItem(null)
+      })
+    } catch {
+      setPlayerItem(null)
+    }
+
+    window.setTimeout(() => {
+      stopAvPlayPlayback()
+    }, 0)
   }
 
   function playPlayer() {
@@ -4169,7 +4311,7 @@ function TvApp() {
     function handleVisibilityChange() {
       if (document.hidden) {
         if (playerItem) {
-          closePlayer()
+          closePlayer('visibility-hidden')
         } else {
           clearScanPreview()
           clearScanPreviewImages()
@@ -4201,18 +4343,58 @@ function TvApp() {
     function handleKeyDown(event: KeyboardEvent) {
       const quickJumpDigit = getQuickJumpDigit(event)
       const action = getRemoteAction(event)
+      const hasActionMenu = Boolean(actionMenuRef.current)
+      const hasDetailTitle = Boolean(detailTitleRef.current)
+      const currentPlayerItem = playerItemRef.current
 
-      if (!action && (quickJumpDigit === null || !playerItem)) {
+      if (!action && (quickJumpDigit === null || !currentPlayerItem)) {
+        return
+      }
+
+      if (action === 'back' && currentPlayerItem && !hasActionMenu) {
+        event.preventDefault()
+        event.stopImmediatePropagation()
+        tvLastPlayerInputAtRef.current = getCurrentTimestamp()
+
+        if (!event.repeat) {
+          recordTvDiagnostic('remote-keydown', {
+            action,
+            key: event.key,
+            keyCode: event.keyCode,
+            uiRecovery: {
+              skippedForPlayerClose: true,
+            },
+          }, {
+            immediate: true,
+          })
+        }
+
+        recordTvDiagnostic('player-action', {
+          action,
+          key: event.key,
+          keyCode: event.keyCode,
+          repeat: event.repeat,
+          routedFromCapture: true,
+        }, {
+          immediate: true,
+        })
+
+        if (scanPreview) {
+          cancelScanPreview()
+        } else {
+          closePlayer('remote-back')
+        }
+
         return
       }
 
       const uiRecoveryTrigger: TvUiRecoveryTrigger | null = action
         ? action
-        : quickJumpDigit !== null && playerItem
+        : quickJumpDigit !== null && currentPlayerItem
           ? 'quickJump'
           : null
       const isSeekLikePlayerInput = Boolean(
-        playerItem &&
+        currentPlayerItem &&
           (quickJumpDigit !== null || action === 'left' || action === 'right'),
       )
       const uiRecovery = uiRecoveryTrigger
@@ -4221,11 +4403,11 @@ function TvApp() {
           : recoverStalledTvUi(uiRecoveryTrigger)
         : { recovered: false }
 
-      if (playerItem && uiRecoveryTrigger) {
+      if (currentPlayerItem && uiRecoveryTrigger) {
         tvLastPlayerInputAtRef.current = getCurrentTimestamp()
       }
 
-      if (quickJumpDigit !== null && playerItem) {
+      if (quickJumpDigit !== null && currentPlayerItem) {
         event.preventDefault()
 
         if (event.repeat) {
@@ -4262,9 +4444,9 @@ function TvApp() {
 
       if (
         action === 'back' &&
-        !actionMenu &&
-        !playerItem &&
-        !detailTitle
+        !hasActionMenu &&
+        !currentPlayerItem &&
+        !hasDetailTitle
       ) {
         if (exitTizenApplication()) {
           event.preventDefault()
@@ -4275,17 +4457,17 @@ function TvApp() {
 
       event.preventDefault()
 
-      if (actionMenu) {
+      if (hasActionMenu) {
         handleActionMenuAction(action)
         return
       }
 
-      if (playerItem) {
+      if (currentPlayerItem) {
         handlePlayerAction(action, event)
         return
       }
 
-      if (detailTitle) {
+      if (hasDetailTitle) {
         handleDetailAction(action)
         return
       }
@@ -4297,7 +4479,7 @@ function TvApp() {
       const action = getRemoteAction(event)
 
       if (
-        !playerItem ||
+        !playerItemRef.current ||
         (action !== 'left' && action !== 'right')
       ) {
         return
@@ -4312,12 +4494,12 @@ function TvApp() {
       handlePlayerScanKeyUp(action === 'right' ? 1 : -1)
     }
 
-    window.addEventListener('keydown', handleKeyDown)
-    window.addEventListener('keyup', handleKeyUp)
+    window.addEventListener('keydown', handleKeyDown, true)
+    window.addEventListener('keyup', handleKeyUp, true)
 
     return () => {
-      window.removeEventListener('keydown', handleKeyDown)
-      window.removeEventListener('keyup', handleKeyUp)
+      window.removeEventListener('keydown', handleKeyDown, true)
+      window.removeEventListener('keyup', handleKeyUp, true)
     }
   })
 
@@ -4444,6 +4626,7 @@ function TvApp() {
               playerItem,
               apiBase,
               playerPlaybackStrategy,
+              clientProfile,
             )}
           />
         ) : (
@@ -4780,7 +4963,7 @@ function TvApp() {
                     >
                       <span>{getDetailItemLabel(item)}</span>
                       <strong>{getDetailItemTitle(item)}</strong>
-                      <p>{getDetailPlaybackLabel(item, playback)}</p>
+                      <p>{getDetailPlaybackLabel(item, playback, clientProfile)}</p>
                       {playback && playback.duration > 0 ? (
                         <div className="tv-progress" aria-hidden="true">
                           <i
@@ -5103,9 +5286,9 @@ function getShowResumeItem(episodes: MediaItem[], history: PlaybackHistory) {
     const regularEpisodes = episodes.filter((episode) => !isShowExtraItem(episode))
 
     return (
-      regularEpisodes.find(isTvNativePlaybackCandidate) ??
+      regularEpisodes.find((episode) => isTvNativePlaybackCandidate(episode)) ??
       regularEpisodes[0] ??
-      episodes.find(isTvNativePlaybackCandidate) ??
+      episodes.find((episode) => isTvNativePlaybackCandidate(episode)) ??
       episodes[0]
     )
   }
@@ -5697,25 +5880,67 @@ function safelyReadBoolean(readValue: () => boolean | undefined) {
   }
 }
 
-function getInitialPlaybackStrategy(item: MediaItem): PlaybackStrategy {
-  return isTvNativePlaybackCandidate(item) ? 'native' : 'transcode'
+function getAvPlayErrorReason(eventType: string | undefined, eventMessage = '') {
+  const message = eventMessage.trim()
+
+  if (message) {
+    return message
+  }
+
+  switch (eventType) {
+    case 'PLAYER_ERROR_AUDIO_CODEC_NOT_SUPPORTED':
+      return 'AVPlay audio codec unsupported'
+    case 'PLAYER_ERROR_CONNECTION_FAILED':
+      return 'AVPlay connection failed'
+    case 'PLAYER_ERROR_INVALID_OPERATION':
+      return 'AVPlay invalid operation'
+    case 'PLAYER_ERROR_INVALID_PARAMETER':
+      return 'AVPlay invalid parameter'
+    case 'PLAYER_ERROR_INVALID_STATE':
+      return 'AVPlay invalid state'
+    case 'PLAYER_ERROR_INVALID_URI':
+      return 'AVPlay invalid stream URL'
+    case 'PLAYER_ERROR_NO_SUCH_FILE':
+      return 'AVPlay media not found'
+    case 'PLAYER_ERROR_NOT_SUPPORTED_FILE':
+      return 'AVPlay file unsupported'
+    case 'PLAYER_ERROR_SEEK_FAILED':
+      return 'AVPlay seek failed'
+    case 'PLAYER_ERROR_VIDEO_CODEC_NOT_SUPPORTED':
+      return 'AVPlay video codec unsupported'
+    default:
+      return eventType ? `AVPlay failed: ${eventType}` : 'AVPlay failed'
+  }
+}
+
+function getInitialPlaybackStrategy(
+  item: MediaItem,
+  clientProfile?: ClientDeviceProfile,
+): PlaybackStrategy {
+  return isTvNativePlaybackCandidate(item, clientProfile) ? 'native' : 'transcode'
 }
 
 function getPlaybackStrategy(
   item: MediaItem,
   strategies: Record<string, PlaybackStrategy>,
+  clientProfile?: ClientDeviceProfile,
 ) {
-  return strategies[item.id] ?? getInitialPlaybackStrategy(item)
+  const strategy = strategies[item.id] ?? getInitialPlaybackStrategy(item, clientProfile)
+
+  return strategy === 'native' && !isTvNativePlaybackCandidate(item, clientProfile)
+    ? 'transcode'
+    : strategy
 }
 
 function getPlaybackEngine(
   item: MediaItem,
   strategy: PlaybackStrategy,
+  clientProfile?: ClientDeviceProfile,
 ): PlayerEngine {
   if (
     strategy === 'native' &&
     !item.browserPlayable &&
-    isTvNativePlaybackCandidate(item) &&
+    isTvNativePlaybackCandidate(item, clientProfile) &&
     Boolean((window as MyHomeMediaServerWindow).webapis?.avplay)
   ) {
     return 'avplay'
@@ -5724,10 +5949,29 @@ function getPlaybackEngine(
   return 'html'
 }
 
-function isTvNativePlaybackCandidate(item: MediaItem) {
+function isTvNativePlaybackCandidate(
+  item: MediaItem,
+  clientProfile?: ClientDeviceProfile,
+) {
+  const container = item.container.toUpperCase()
+
+  if (
+    isSamsungTvEmulator(clientProfile) &&
+    tvEmulatorAvPlayBlockedContainers.has(container)
+  ) {
+    return item.browserPlayable
+  }
+
   return (
     item.browserPlayable ||
-    tvNativePlaybackContainers.has(item.container.toUpperCase())
+    tvNativePlaybackContainers.has(container)
+  )
+}
+
+function isSamsungTvEmulator(clientProfile?: ClientDeviceProfile) {
+  return (
+    clientProfile?.model?.toUpperCase() === 'EMULATOR' ||
+    clientProfile?.modelCode?.toUpperCase() === 'EMULATOR'
   )
 }
 
@@ -5763,8 +6007,9 @@ function getPlaybackStreamUrl(
   item: MediaItem,
   apiBase: string,
   strategy = getInitialPlaybackStrategy(item),
+  clientProfile?: ClientDeviceProfile,
 ) {
-  if (strategy === 'native' && isTvNativePlaybackCandidate(item)) {
+  if (strategy === 'native' && isTvNativePlaybackCandidate(item, clientProfile)) {
     return resolveMediaUrl(item.streamUrl, apiBase)
   }
 
@@ -6677,7 +6922,9 @@ function getDefaultDetailItemIndex(title: TvTitle, history: PlaybackHistory) {
     return watchedItem.itemIndex
   }
 
-  const firstPlayableIndex = title.items.findIndex(isTvNativePlaybackCandidate)
+  const firstPlayableIndex = title.items.findIndex((item) =>
+    isTvNativePlaybackCandidate(item),
+  )
 
   return Math.max(firstPlayableIndex, 0)
 }
@@ -6701,13 +6948,14 @@ function hasEpisodeCode(item: MediaItem) {
 function getDetailPlaybackLabel(
   item: MediaItem,
   playback: PlaybackRecord | null,
+  clientProfile?: ClientDeviceProfile,
 ) {
   if (!playback) {
-    if (!item.browserPlayable && isTvNativePlaybackCandidate(item)) {
+    if (!item.browserPlayable && isTvNativePlaybackCandidate(item, clientProfile)) {
       return `${item.container} native first`
     }
 
-    if (!isTvNativePlaybackCandidate(item)) {
+    if (!isTvNativePlaybackCandidate(item, clientProfile)) {
       return `${item.container} transcode fallback`
     }
 
@@ -7485,7 +7733,31 @@ function setTvPlayerKeepAwake(
 }
 
 function getErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : 'Unexpected error'
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  if (typeof error === 'string') {
+    return error
+  }
+
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message
+
+    if (typeof message === 'string' && message.trim()) {
+      return message
+    }
+  }
+
+  if (error === null || error === undefined) {
+    return 'Unexpected error'
+  }
+
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
 }
 
 function getCurrentTimestamp() {
