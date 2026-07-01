@@ -774,9 +774,10 @@ export async function handleMediaApi(
     url.pathname === '/api/transcode-cache' ||
     /^\/api\/files\/[^/]+\/download$/.test(url.pathname) ||
     /^\/api\/playback\/[^/]+$/.test(url.pathname) ||
-    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|preview-sheet|preview-sprite|stream|transcode)$/.test(
+    /^\/api\/media\/[^/]+\/(?:artwork|preview-frame|preview-sheet|preview-sprite|transcode)$/.test(
       url.pathname,
-    )
+    ) ||
+    /^\/api\/media\/[^/]+\/stream(?:\/[^/]+)?$/.test(url.pathname)
 
   if (isApiPath && req.method === 'OPTIONS') {
     res.writeHead(204, API_CORS_HEADERS)
@@ -1055,7 +1056,9 @@ export async function handleMediaApi(
     return true
   }
 
-  const streamMatch = /^\/api\/media\/([^/]+)\/stream$/.exec(url.pathname)
+  const streamMatch = /^\/api\/media\/([^/]+)\/stream(?:\/[^/]+)?$/.exec(
+    url.pathname,
+  )
 
   if (streamMatch) {
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -2013,7 +2016,7 @@ async function collectMediaFiles(
       sizeBytes: stats.size,
       sizeLabel: formatBytes(stats.size),
       modifiedAt: stats.mtime.toISOString(),
-      streamUrl: `/api/media/${encodeURIComponent(mediaId)}/stream`,
+      streamUrl: getMediaStreamUrl(mediaId, entry.name),
       showTitle: mediaMetadata.showTitle,
       seasonNumber: mediaMetadata.seasonNumber,
       episodeNumber: mediaMetadata.episodeNumber,
@@ -4559,6 +4562,7 @@ async function streamMedia(
 
   streamFileContent(filePath, stats, req, res, {
     cacheControl: 'no-store',
+    contentDisposition: getInlineContentDisposition(basename(filePath)),
     contentType: mimeType,
   })
 }
@@ -5029,6 +5033,22 @@ function getAttachmentContentDisposition(filename: string) {
     'download'
 
   return `attachment; filename="${fallbackFilename}"; filename*=UTF-8''${encodeHeaderValue(
+    filename,
+  )}`
+}
+
+function getInlineContentDisposition(filename: string) {
+  const fallbackFilename =
+    filename.replace(/["\\\r\n]/g, '_').replace(/[^\x20-\x7e]/g, '_') ||
+    'media'
+
+  return `inline; filename="${fallbackFilename}"; filename*=UTF-8''${encodeHeaderValue(
+    filename,
+  )}`
+}
+
+function getMediaStreamUrl(mediaId: string, filename: string) {
+  return `/api/media/${encodeURIComponent(mediaId)}/stream/${encodeURIComponent(
     filename,
   )}`
 }
