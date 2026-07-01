@@ -463,8 +463,6 @@ const tvDiagnosticsMaxBatchEvents = 6
 const tvDiagnosticsMaxLocalEvents = 250
 const tvDiagnosticsPostTimeoutMs = 8000
 const tvDiagnosticsStorageKey = 'my-home-media-server-tv-diagnostics-v1'
-const tvUiCompositorIdlePulseAfterMs = 2 * 60 * 1000
-const tvUiCompositorIdlePulseIntervalMs = 60_000
 const tvPlayerInputIdleRecoveryMs = 60_000
 const tvUiStallRecoveryCooldownMs = 15_000
 const tvUiStallRecoveryMs = 5_000
@@ -1886,50 +1884,6 @@ function TvApp() {
     preventSleepWhilePaused,
     shouldKeepTvPlayerAwake,
   ])
-
-  useEffect(() => {
-    if (!activePlayerItemId || !isAppVisible) {
-      return
-    }
-
-    const intervalId = window.setInterval(() => {
-      const playbackPaused = playerPlaybackPausedRef.current
-
-      if (!playbackPaused) {
-        return
-      }
-
-      const now = getCurrentTimestamp()
-      const pausedForMs =
-        playerPausedAtRef.current === null
-          ? null
-          : Math.max(0, now - playerPausedAtRef.current)
-      const inputIdleMs = Math.max(0, now - tvLastPlayerInputAtRef.current)
-      const shouldPulse =
-        inputIdleMs >= tvUiCompositorIdlePulseAfterMs ||
-        (pausedForMs !== null &&
-          pausedForMs >= tvUiCompositorIdlePulseAfterMs)
-
-      if (!shouldPulse) {
-        return
-      }
-
-      const recoveryIndex = tvUiRecoveryCountRef.current + 1
-
-      tvUiRecoveryCountRef.current = recoveryIndex
-      pulseTvUiCompositor(recoveryIndex)
-      recordTvDiagnosticRef.current('ui-idle-compositor-pulse', {
-        inputIdleMs,
-        pausedForMs,
-        playbackPaused,
-        recoveryIndex,
-      })
-    }, tvUiCompositorIdlePulseIntervalMs)
-
-    return () => {
-      window.clearInterval(intervalId)
-    }
-  }, [activePlayerItemId, isAppVisible])
 
   useEffect(() => {
     if (!activePlayerItemId) {
