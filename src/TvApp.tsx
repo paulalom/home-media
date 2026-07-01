@@ -461,6 +461,7 @@ const tvDiagnosticsHeartbeatMs = 60_000
 const tvDiagnosticsLocalPersistDelayMs = 5000
 const tvDiagnosticsMaxBatchEvents = 6
 const tvDiagnosticsMaxLocalEvents = 250
+const tvDiagnosticsPostTimeoutMs = 8000
 const tvDiagnosticsStorageKey = 'my-home-media-server-tv-diagnostics-v1'
 const tvUiCompositorIdlePulseAfterMs = 2 * 60 * 1000
 const tvUiCompositorIdlePulseIntervalMs = 60_000
@@ -1693,6 +1694,11 @@ function TvApp() {
 
     tvDiagnosticsInFlightRef.current = true
 
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => {
+      controller.abort()
+    }, tvDiagnosticsPostTimeoutMs)
+
     try {
       const response = await fetch(buildApiUrl('/api/tv-diagnostics', apiBase), {
         body: JSON.stringify({
@@ -1705,6 +1711,7 @@ function TvApp() {
           'Content-Type': 'application/json',
         },
         method: 'POST',
+        signal: controller.signal,
       })
 
       if (!response.ok) {
@@ -1724,6 +1731,7 @@ function TvApp() {
 
       scheduleLocalTvDiagnosticsPersist()
     } finally {
+      window.clearTimeout(timeoutId)
       tvDiagnosticsInFlightRef.current = false
 
       if (tvDiagnosticsQueueRef.current.length > 0) {

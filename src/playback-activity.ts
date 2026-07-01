@@ -4,6 +4,7 @@ export const playbackActivityHeartbeatMs = 30_000
 
 const playbackActivityClientIdStorageKey =
   'my-home-media-server-playback-activity-client-v1'
+const playbackActivityReportTimeoutMs = 8000
 
 let memoryPlaybackActivityClientId: string | null = null
 
@@ -39,18 +40,37 @@ export async function reportPlaybackActivity(
   state: PlaybackActivityState,
   signal?: AbortSignal,
 ) {
-  const response = await fetch(buildApiUrl('/api/playback-activity', apiBase), {
-    body: JSON.stringify(createPlaybackActivityPayload(clientId, mediaId, state)),
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    method: 'POST',
-    signal,
-  })
+  const controller = new AbortController()
+  const timeoutId = window.setTimeout(() => {
+    controller.abort()
+  }, playbackActivityReportTimeoutMs)
+  const abortFromCaller = () => controller.abort()
 
-  if (!response.ok) {
-    throw new Error(`Playback activity failed (${response.status})`)
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort()
+    }
+
+    signal.addEventListener('abort', abortFromCaller, { once: true })
+  }
+
+  try {
+    const response = await fetch(buildApiUrl('/api/playback-activity', apiBase), {
+      body: JSON.stringify(createPlaybackActivityPayload(clientId, mediaId, state)),
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      throw new Error(`Playback activity failed (${response.status})`)
+    }
+  } finally {
+    window.clearTimeout(timeoutId)
+    signal?.removeEventListener('abort', abortFromCaller)
   }
 }
 
