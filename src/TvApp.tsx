@@ -122,6 +122,15 @@ type PlayerClock = {
   position: number
 }
 
+type PendingPlaybackSeek = {
+  expiresAt: number
+  position: number
+}
+
+type PlayerClockUpdateOptions = {
+  localSeek?: boolean
+}
+
 type ScanDirection = -1 | 1
 
 type ScanPreview = {
@@ -403,6 +412,8 @@ const playerQuickJumpRemoteKeys = [
   '8',
   '9',
 ]
+const playerSeekSettleStaleUpdateWindowMs = 2500
+const playerSeekSettleToleranceSeconds = 4
 const playerSeekStepSeconds = 5
 const playerShortSeekPreviewHoldMs = 250
 const playerShortSeekPreviewBackgroundClicks = 5
@@ -625,6 +636,7 @@ function TvApp() {
   >(new Map())
   const playerScanWasPlayingRef = useRef(false)
   const playerPausedAtRef = useRef<number | null>(null)
+  const playerPendingSeekRef = useRef<PendingPlaybackSeek | null>(null)
   const playerPlaybackPausedRef = useRef(true)
   const playerShortSeekPreviewLoadTokenRef = useRef(0)
   const playerShortSeekPreviewTimeoutRef = useRef<number | null>(null)
@@ -2474,6 +2486,10 @@ function TvApp() {
   }
 
   function recoverLongPausedPlayerSurface(action: RemoteAction) {
+    if (action === 'left' || action === 'right') {
+      return false
+    }
+
     const snapshot = readActivePlaybackSnapshot()
 
     if (!snapshot || !snapshot.paused || snapshot.ended) {
@@ -2638,9 +2654,10 @@ function TvApp() {
       heartbeatStaleMs >= tvUiStallRecoveryMs ||
       (isPlaying && freshness.clockUpdateStaleMs >= tvUiStallRecoveryMs)
 
-    if (!isInputIdle && !isVisuallyStale) {
+    if (!isVisuallyStale) {
       return {
         recovered: false,
+        skippedIdleOnly: isInputIdle,
         ...freshness,
       }
     }
@@ -2974,6 +2991,10 @@ function TvApp() {
 
     const duration = avPlayPlaybackRef.current.duration || getAvPlayDuration()
     const clampedPosition = clamp(position, 0, duration || position)
+
+    if (shouldIgnorePendingSeekClockUpdate(clampedPosition)) {
+      return
+    }
 
     if (clampedPosition > 0.25) {
       clearPlayerStartupTimeout()
@@ -3320,7 +3341,10 @@ function TvApp() {
     const shouldResumePlayback = playerScanWasPlayingRef.current && !snapshot.ended
 
     seekActivePlayback(nextPosition)
-    updatePlayerClockFromValues(duration, nextPosition)
+    updatePlayerClockFromValues(duration, nextPosition, undefined, {
+      localSeek: true,
+    })
+    markPendingPlaybackSeek(nextPosition)
 
     if (!shouldResumePlayback) {
       stopScanPreviewTicker()
@@ -3756,7 +3780,11 @@ function TvApp() {
       duration,
       nextPosition,
       seconds >= 0 ? 1 : -1,
+      {
+        localSeek: true,
+      },
     )
+    markPendingPlaybackSeek(nextPosition)
     showShortSeekPreview(nextPosition, duration)
     showPlayerHud(!snapshot.paused && !snapshot.ended)
   }
@@ -3774,7 +3802,10 @@ function TvApp() {
 
     cancelScanPreview()
     seekActivePlayback(nextPosition)
-    updatePlayerClockFromValues(duration, nextPosition, seekDirection)
+    updatePlayerClockFromValues(duration, nextPosition, seekDirection, {
+      localSeek: true,
+    })
+    markPendingPlaybackSeek(nextPosition)
     showShortSeekPreview(nextPosition, duration)
     showPlayerHud(!snapshot.paused && !snapshot.ended)
   }
@@ -3974,11 +4005,45 @@ function TvApp() {
     )
   }
 
+  function markPendingPlaybackSeek(position: number) {
+    playerPendingSeekRef.current = {
+      expiresAt: getCurrentTimestamp() + playerSeekSettleStaleUpdateWindowMs,
+      position,
+    }
+  }
+
+  function shouldIgnorePendingSeekClockUpdate(position: number) {
+    const pendingSeek = playerPendingSeekRef.current
+
+    if (!pendingSeek) {
+      return false
+    }
+
+    if (getCurrentTimestamp() >= pendingSeek.expiresAt) {
+      playerPendingSeekRef.current = null
+      return false
+    }
+
+    const distanceFromTarget = Math.abs(position - pendingSeek.position)
+
+    if (distanceFromTarget <= playerSeekSettleToleranceSeconds) {
+      playerPendingSeekRef.current = null
+      return false
+    }
+
+    return true
+  }
+
   function updatePlayerClockFromValues(
     duration: number,
     position: number,
     shortSeekDirection?: ScanDirection,
+    options: PlayerClockUpdateOptions = {},
   ) {
+    if (!options.localSeek && shouldIgnorePendingSeekClockUpdate(position)) {
+      return
+    }
+
     tvLastClockUpdateAtRef.current = getCurrentTimestamp()
     setPlayerClock({
       duration,
@@ -4146,8 +4211,14 @@ function TvApp() {
         : quickJumpDigit !== null && playerItem
           ? 'quickJump'
           : null
+      const isSeekLikePlayerInput = Boolean(
+        playerItem &&
+          (quickJumpDigit !== null || action === 'left' || action === 'right'),
+      )
       const uiRecovery = uiRecoveryTrigger
-        ? recoverStalledTvUi(uiRecoveryTrigger)
+        ? isSeekLikePlayerInput
+          ? { deferredForSeekInput: true, recovered: false }
+          : recoverStalledTvUi(uiRecoveryTrigger)
         : { recovered: false }
 
       if (playerItem && uiRecoveryTrigger) {
@@ -4157,16 +4228,18 @@ function TvApp() {
       if (quickJumpDigit !== null && playerItem) {
         event.preventDefault()
 
-        if (!event.repeat) {
-          recordTvDiagnostic('player-quick-jump', {
-            digit: quickJumpDigit,
-            key: event.key,
-            keyCode: event.keyCode,
-            uiRecovery,
-          }, {
-            immediate: uiRecovery.recovered === true,
-          })
+        if (event.repeat) {
+          return
         }
+
+        recordTvDiagnostic('player-quick-jump', {
+          digit: quickJumpDigit,
+          key: event.key,
+          keyCode: event.keyCode,
+          uiRecovery,
+        }, {
+          immediate: uiRecovery.recovered === true,
+        })
 
         jumpPlayerToQuickPosition(quickJumpDigit)
         return
