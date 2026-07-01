@@ -60,6 +60,13 @@ This app is intended to run on TV hardware with limited CPU, memory, storage, ne
 - Add a one-hour idle validation checklist that records start/end memory, CPU behavior, console errors, and post-idle navigation responsiveness.
 - Add a small diagnostics view or debug overlay that can be enabled without affecting normal TV use.
 
+## Emulator Validation Notes
+
+- Treat DevTools/CDP access as opportunistic during native AVPlay validation. The emulator debug endpoint can become unavailable after native playback starts or after a debugger disconnect.
+- Prefer visible emulator-window captures plus `/api/playback-activity` for native playback evidence when CDP is unstable.
+- If `sdb shell input keyevent` does not move TV focus, send key messages to the emulator window and confirm movement with a window capture.
+- During native playback, validate that `/api/playback-activity` stays active beyond the player startup fallback window and returns inactive after playback closes or the lease expires.
+
 ## Done Criteria For Each Cycle
 
 - The chosen risk has a before/after measurement.

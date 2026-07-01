@@ -418,6 +418,7 @@ const PREVIEW_SPRITE_FRAMES_PER_SHEET =
 const TRANSCODE_CACHE_BACKGROUND_COOLDOWN_MS = 2_000
 const TRANSCODE_TARGET_LABEL = 'MP4 H.264/AAC'
 const PLAYBACK_ACTIVITY_HEARTBEAT_TTL_MS = 90_000
+const PLAYBACK_ACTIVITY_OPEN_LEASE_MS = 4 * 60 * 60_000
 const PLAYBACK_ACTIVITY_ENDED_GRACE_MS = 5 * 60_000
 const PLAYBACK_ACTIVITY_CLEANUP_INTERVAL_MS = 15_000
 const PLAYBACK_ACTIVITY_POWER_REFRESH_SECONDS = 30
@@ -3571,7 +3572,7 @@ function updatePlaybackActivity(report: PlaybackActivityReport) {
         now +
         (report.state === 'ended'
           ? PLAYBACK_ACTIVITY_ENDED_GRACE_MS
-          : PLAYBACK_ACTIVITY_HEARTBEAT_TTL_MS),
+          : PLAYBACK_ACTIVITY_OPEN_LEASE_MS),
       lastReportedAt: now,
       mediaId: report.mediaId ?? '',
       state: report.state,
@@ -3617,6 +3618,7 @@ function getPlaybackActivityStatus(now: number) {
     })),
     endedGraceSeconds: PLAYBACK_ACTIVITY_ENDED_GRACE_MS / 1000,
     heartbeatSeconds: PLAYBACK_ACTIVITY_HEARTBEAT_TTL_MS / 1000,
+    openLeaseSeconds: PLAYBACK_ACTIVITY_OPEN_LEASE_MS / 1000,
     powerRequest: getSystemAwakeRequestState(),
   }
 }
