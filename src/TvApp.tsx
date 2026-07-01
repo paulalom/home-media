@@ -415,6 +415,9 @@ const playerQuickJumpRemoteKeys = [
 const playerSeekSettleStaleUpdateWindowMs = 2500
 const playerSeekSettleToleranceSeconds = 4
 const playerSeekStepSeconds = 5
+const playerUnreliableTranscodeDurationMaxSeconds = 30
+const playerUnreliableTranscodeDurationRatio = 0.25
+const playerUnreliableTranscodeDiagnosticIntervalMs = 30000
 const playerShortSeekPreviewHoldMs = 250
 const playerShortSeekPreviewBackgroundClicks = 5
 const playerShortSeekPreviewDirectionalClicks = 10
@@ -599,6 +602,9 @@ function TvApp() {
   const detailListRef = useRef<HTMLDivElement | null>(null)
   const detailSelectedItemRef = useRef<HTMLDivElement | null>(null)
   const lastPlaybackWriteRef = useRef<Record<string, number>>({})
+  const lastUnreliablePlaybackDurationDiagnosticRef = useRef<
+    Record<string, number>
+  >({})
   const pendingHtmlResumePositionRef = useRef(0)
   const pendingHtmlResumeShouldPlayRef = useRef(true)
   const avPlayPlaybackRef = useRef<AvPlayPlaybackSnapshot>({
@@ -3963,8 +3969,12 @@ function TvApp() {
       return null
     }
 
+    const observedDuration = getFiniteVideoDuration(player)
+
     return {
-      duration: getFiniteVideoDuration(player),
+      duration: playerItem
+        ? getReliablePlaybackDuration(playerItem, observedDuration)
+        : observedDuration,
       ended: player.ended,
       paused: player.paused,
       position: Number.isFinite(player.currentTime) ? player.currentTime : 0,
@@ -4110,17 +4120,42 @@ function TvApp() {
     const video = event.currentTarget
     const pendingResumePosition = pendingHtmlResumePositionRef.current
     const shouldResumePlayback = pendingHtmlResumeShouldPlayRef.current
+    const playbackRecord = playbackHistoryRef.current[item.id] ?? null
+    const observedDuration = getFiniteVideoDuration(video)
+    const isUnreliableDuration = isObservedHtmlTranscodeDurationUnreliable(
+      item,
+      observedDuration,
+      playbackRecord,
+    )
+    const reliableDuration = getReliablePlaybackDuration(
+      item,
+      observedDuration,
+      playbackRecord,
+    )
     const resumePosition = getResumePosition(
-      playbackHistoryRef.current[item.id] ?? null,
-      video.duration,
+      playbackRecord,
+      reliableDuration || observedDuration,
     )
     const targetResumePosition =
       pendingResumePosition > 0
-        ? clamp(pendingResumePosition, 0, getFiniteVideoDuration(video))
+        ? clamp(
+            pendingResumePosition,
+            0,
+            Math.max(reliableDuration, observedDuration, pendingResumePosition),
+          )
         : resumePosition
 
     pendingHtmlResumePositionRef.current = 0
     pendingHtmlResumeShouldPlayRef.current = true
+
+    if (isUnreliableDuration) {
+      recordUnreliablePlaybackDurationDiagnostic(
+        item,
+        observedDuration,
+        reliableDuration,
+        'metadata',
+      )
+    }
 
     if (targetResumePosition > 0) {
       video.currentTime = targetResumePosition
@@ -4141,8 +4176,12 @@ function TvApp() {
   }
 
   function updatePlayerClock(video: HTMLVideoElement) {
+    const observedDuration = getFiniteVideoDuration(video)
+
     updatePlayerClockFromValues(
-      getFiniteVideoDuration(video),
+      playerItem
+        ? getReliablePlaybackDuration(playerItem, observedDuration)
+        : observedDuration,
       Number.isFinite(video.currentTime) ? video.currentTime : 0,
     )
   }
@@ -4244,7 +4283,7 @@ function TvApp() {
     video: HTMLVideoElement,
     force = false,
   ) {
-    const duration = Number.isFinite(video.duration) ? video.duration : 0
+    const duration = getFiniteVideoDuration(video)
     const position = Number.isFinite(video.currentTime) ? video.currentTime : 0
 
     recordPlaybackFromValues(item, duration, position, force)
@@ -4256,10 +4295,33 @@ function TvApp() {
     position: number,
     force = false,
   ) {
-    if (!duration || position < 1) {
+    const observedDuration = getFinitePlaybackDuration(duration)
+    const playbackRecord = playbackHistoryRef.current[item.id] ?? null
+    const isUnreliableDuration = isObservedHtmlTranscodeDurationUnreliable(
+      item,
+      observedDuration,
+      playbackRecord,
+    )
+    const reliableDuration = getReliablePlaybackDuration(
+      item,
+      observedDuration,
+      playbackRecord,
+    )
+
+    if (isUnreliableDuration) {
+      recordUnreliablePlaybackDurationDiagnostic(
+        item,
+        observedDuration,
+        reliableDuration,
+        'history-write',
+      )
+    }
+
+    if (!reliableDuration || position < 1) {
       return
     }
 
+    const reliablePosition = clamp(position, 0, reliableDuration)
     const now = getCurrentTimestamp()
 
     if (!force && now - (lastPlaybackWriteRef.current[item.id] ?? 0) < 5000) {
@@ -4268,9 +4330,9 @@ function TvApp() {
 
     lastPlaybackWriteRef.current[item.id] = now
     const record = {
-      completed: position / duration >= 0.95,
-      duration,
-      position,
+      completed: reliablePosition / reliableDuration >= 0.95,
+      duration: reliableDuration,
+      position: reliablePosition,
       updatedAt: now,
     }
 
@@ -4279,6 +4341,89 @@ function TvApp() {
       [item.id]: record,
     }))
     void savePlaybackRecord(apiBase, item.id, record).catch(() => undefined)
+  }
+
+  function getReliablePlaybackDuration(
+    item: MediaItem,
+    observedDuration: number,
+    playbackRecord: PlaybackRecord | null =
+      playbackHistoryRef.current[item.id] ?? null,
+  ) {
+    const finiteObservedDuration = getFinitePlaybackDuration(observedDuration)
+
+    if (
+      !isObservedHtmlTranscodeDurationUnreliable(
+        item,
+        finiteObservedDuration,
+        playbackRecord,
+      )
+    ) {
+      return finiteObservedDuration
+    }
+
+    const recordedDuration = getFinitePlaybackDuration(
+      playbackRecord?.duration ?? 0,
+    )
+
+    return recordedDuration > finiteObservedDuration ? recordedDuration : 0
+  }
+
+  function isObservedHtmlTranscodeDurationUnreliable(
+    item: MediaItem,
+    observedDuration: number,
+    playbackRecord: PlaybackRecord | null =
+      playbackHistoryRef.current[item.id] ?? null,
+  ) {
+    if (playerPlaybackStrategy !== 'transcode' || item.browserPlayable) {
+      return false
+    }
+
+    const finiteObservedDuration = getFinitePlaybackDuration(observedDuration)
+
+    if (finiteObservedDuration < playerUnreliableTranscodeDurationMaxSeconds) {
+      return true
+    }
+
+    const recordedDuration = getFinitePlaybackDuration(
+      playbackRecord?.duration ?? 0,
+    )
+
+    return (
+      recordedDuration > playerUnreliableTranscodeDurationMaxSeconds &&
+      finiteObservedDuration <
+        recordedDuration * playerUnreliableTranscodeDurationRatio
+    )
+  }
+
+  function recordUnreliablePlaybackDurationDiagnostic(
+    item: MediaItem,
+    observedDuration: number,
+    reliableDuration: number,
+    source: string,
+  ) {
+    const diagnosticKey = `${item.id}:${source}`
+    const now = getCurrentTimestamp()
+
+    if (
+      now -
+        (lastUnreliablePlaybackDurationDiagnosticRef.current[diagnosticKey] ??
+          0) <
+      playerUnreliableTranscodeDiagnosticIntervalMs
+    ) {
+      return
+    }
+
+    lastUnreliablePlaybackDurationDiagnosticRef.current[diagnosticKey] = now
+    recordTvDiagnostic('playback-duration-unreliable', {
+      itemId: item.id,
+      observedDuration,
+      playbackStrategy: playerPlaybackStrategy,
+      reliableDuration,
+      source,
+      title: getItemDisplayTitle(item),
+    }, {
+      immediate: true,
+    })
   }
 
   useEffect(() => {
@@ -7218,10 +7363,12 @@ function getQuickJumpPosition(digit: QuickJumpDigit, duration: number) {
   return (duration * digit) / playerQuickJumpLastDigit
 }
 
+function getFinitePlaybackDuration(duration: number) {
+  return Number.isFinite(duration) && duration > 0 ? duration : 0
+}
+
 function getFiniteVideoDuration(video: HTMLVideoElement) {
-  return Number.isFinite(video.duration) && video.duration > 0
-    ? video.duration
-    : 0
+  return getFinitePlaybackDuration(video.duration)
 }
 
 function sortByTitle(first: TvTitle, second: TvTitle) {
