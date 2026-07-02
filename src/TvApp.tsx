@@ -232,6 +232,9 @@ type ActionMenuState =
   | {
       kind: 'settings'
       preventSleepWhilePaused: boolean
+      selectedAllUnwatchItems: MediaItem[]
+      selectedCurrentUnwatchItems: MediaItem[]
+      selectedHasMultipleComponents: boolean
     }
   | {
       kind: 'title'
@@ -2469,9 +2472,21 @@ function TvApp() {
   }
 
   function openSettingsMenu() {
+    const selectedCurrentUnwatchItems = getMainMenuCurrentUnwatchItems(
+      selectedTitle,
+      playbackHistoryRef.current,
+    )
+    const selectedAllUnwatchItems = getMainMenuAllUnwatchItems(
+      selectedTitle,
+      playbackHistoryRef.current,
+    )
+
     setActionMenu({
       kind: 'settings',
       preventSleepWhilePaused,
+      selectedAllUnwatchItems,
+      selectedCurrentUnwatchItems,
+      selectedHasMultipleComponents: (selectedTitle?.items.length ?? 0) > 1,
     })
     setActionMenuIndex(0)
   }
@@ -2492,6 +2507,18 @@ function TvApp() {
     entryId: ActionMenuEntry['id'],
   ) {
     if (menu.kind === 'settings') {
+      if (entryId === 'mark-unwatched') {
+        markItemsUnwatched(menu.selectedCurrentUnwatchItems)
+        closeActionMenu()
+        return
+      }
+
+      if (entryId === 'mark-all-unwatched') {
+        markItemsUnwatched(menu.selectedAllUnwatchItems)
+        closeActionMenu()
+        return
+      }
+
       if (entryId === 'toggle-prevent-sleep-while-paused') {
         setPreventSleepWhilePaused((currentValue) => {
           const nextValue = !currentValue
@@ -5395,7 +5422,7 @@ function TvApp() {
           <strong>{getClientDeviceLabel(clientProfile)}</strong>
           <small>{apiBase || 'Local package'}</small>
           <button
-            aria-label="TV playback settings"
+            aria-label="Main menu actions"
             className={[
               'tv-icon-button tv-topbar-settings-button',
               safeFocus.area === 'settings' ? 'selected' : '',
@@ -5403,7 +5430,7 @@ function TvApp() {
               .filter(Boolean)
               .join(' ')}
             onClick={openSettingsMenu}
-            title="TV playback settings"
+            title="Main menu actions"
             type="button"
           >
             <Settings size={20} />
@@ -7400,7 +7427,7 @@ function getPlayerEpisodeSwitchButtonClassName(isSelected: boolean) {
 
 function getActionMenuEntries(menu: ActionMenuState): ActionMenuEntry[] {
   if (menu.kind === 'settings') {
-    return [
+    const entries: ActionMenuEntry[] = [
       {
         id: 'toggle-prevent-sleep-while-paused',
         label: `Prevent sleep while paused: ${
@@ -7408,6 +7435,29 @@ function getActionMenuEntries(menu: ActionMenuState): ActionMenuEntry[] {
         }`,
       },
     ]
+
+    if (menu.selectedAllUnwatchItems.length) {
+      if (menu.selectedHasMultipleComponents) {
+        if (menu.selectedCurrentUnwatchItems.length) {
+          entries.push({
+            id: 'mark-unwatched',
+            label: 'Mark current unwatched',
+          })
+        }
+
+        entries.push({
+          id: 'mark-all-unwatched',
+          label: 'Mark all as unwatched',
+        })
+      } else {
+        entries.push({
+          id: 'mark-unwatched',
+          label: 'Mark unwatched',
+        })
+      }
+    }
+
+    return entries
   }
 
   if (menu.kind === 'title') {
@@ -7460,7 +7510,9 @@ function getActionMenuEntries(menu: ActionMenuState): ActionMenuEntry[] {
 
 function getActionMenuEyebrow(menu: ActionMenuState) {
   if (menu.kind === 'settings') {
-    return 'TV settings'
+    return menu.selectedAllUnwatchItems.length
+      ? 'Main menu actions'
+      : 'TV settings'
   }
 
   if (menu.kind === 'title') {
@@ -7484,6 +7536,47 @@ function getActionMenuTitle(menu: ActionMenuState) {
   const item = menu.title.items[menu.itemIndex]
 
   return item ? getDetailItemTitle(item) : menu.title.title
+}
+
+function getMainMenuCurrentUnwatchItems(
+  title: TvTitle | null,
+  history: PlaybackHistory,
+) {
+  if (!title) {
+    return []
+  }
+
+  if (history[title.resumeItem.id]) {
+    return [title.resumeItem]
+  }
+
+  const latestWatchedItem = getLatestWatchedItem(title.items, history)
+
+  return latestWatchedItem ? [latestWatchedItem] : []
+}
+
+function getMainMenuAllUnwatchItems(
+  title: TvTitle | null,
+  history: PlaybackHistory,
+) {
+  if (!title) {
+    return []
+  }
+
+  return title.items.filter((item) => history[item.id])
+}
+
+function getLatestWatchedItem(items: MediaItem[], history: PlaybackHistory) {
+  return items
+    .map((item) => ({
+      item,
+      record: history[item.id] ?? null,
+    }))
+    .filter((entry) => entry.record)
+    .sort(
+      (first, second) =>
+        (second.record?.updatedAt ?? 0) - (first.record?.updatedAt ?? 0),
+    )[0]?.item ?? null
 }
 
 function getResumePosition(record: PlaybackRecord | null, duration: number) {
