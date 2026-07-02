@@ -2160,6 +2160,11 @@ function TvApp() {
 
     if (action === 'up') {
       if (safeFocus.area === 'rows') {
+        if (safeFocus.sectionIndex > 0) {
+          moveFocus(-1, 0)
+          return
+        }
+
         setFocusArea('hero')
         return
       }
